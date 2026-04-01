@@ -9,7 +9,7 @@ namespace Engine {
 	void FlyCamera::Update(Timestep ts)
 	{
 		static bool moving = false;
-		if (!Input::IsMouseButtonPressed(1)) {
+		if (!Input::IsMouseButtonPressed(0)) {
 			moving = false;
 			return;
 		}
