@@ -82,6 +82,12 @@ namespace Engine {
 	void OpenGLFrameBuffer::AddTexture(const SPtr<Texture>& texture)
 	{
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + m_ColorTextureOffset++, GL_TEXTURE_2D, texture->GetRenderId(), 0);
+		if (m_ColorTextureOffset == 1)
+		{
+			const GLenum colorAttachment = GL_COLOR_ATTACHMENT0;
+			glDrawBuffers(1, &colorAttachment);
+			glReadBuffer(colorAttachment);
+		}
 	}
 
 	void OpenGLFrameBuffer::AddRenderBuffer(const SPtr<RenderBuffer>& rb)
@@ -94,7 +100,14 @@ namespace Engine {
 
 	bool OpenGLFrameBuffer::Check() const
 	{
-		return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+		const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+		if (status != GL_FRAMEBUFFER_COMPLETE)
+		{
+			ERROR_CORE("Framebuffer is incomplete: 0x{0:x}", static_cast<uint>(status));
+			return false;
+		}
+
+		return true;
 	}
 
 	OpenGLRenderBuffer::OpenGLRenderBuffer(uint windth, uint heigth)

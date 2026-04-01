@@ -88,7 +88,11 @@ public:
 		renderBuffer.reset(RenderBuffer::Create((int)screenWidth, (int)screenHeight));
 		m_ScreenFrameBuffer->AddRenderBuffer(renderBuffer);
 
-		m_ScreenFrameBuffer->Check();
+		m_PostProcessReady = m_ScreenFrameBuffer->Check();
+		if (!m_PostProcessReady)
+		{
+			ERROR_CORE("Post-processing framebuffer failed, falling back to direct rendering");
+		}
 		m_ScreenFrameBuffer->Unbind();
 	}
 
@@ -105,40 +109,32 @@ public:
 
 		Renderer::BeginScene(m_Camera.GetRenderCamera());
 
-		m_ScreenFrameBuffer->Bind();
-		RenderCommand::SetClearColor({ 0.1f, 0.1f, 0.1f, 1.f });
-		RenderCommand::Clear();
-
 		auto& sl = m_ScnLight.spotLights[0];
 		sl.position = m_Camera.GetPosition();
 		Math::matGetForward(m_Camera.GetTransform(), sl.direction);
 
-		auto defaultShader = AssetManager::GetShader(m_DefaultShader);
-		defaultShader->Bind();
-		defaultShader->UploadUniformsDefaultLighting(m_ScnLight, m_Camera.GetPosition());
-		defaultShader->UploadUniformInt("u_dbgDisableNormalMapping", m_DbgDisableNormalMapping ? 1 : 0);
+		if (m_EnablePostProcessing && m_PostProcessReady)
+		{
+			m_ScreenFrameBuffer->Bind();
+			RenderCommand::SetClearColor({ 0.1f, 0.1f, 0.1f, 1.f });
+			RenderCommand::Clear();
 
-		m_Model->SetTransform(glm::mat4(1.f));
-		m_Model->Render(defaultShader);
+			RenderScene();
 
-		RenderCommand::CullFaces(false);
-		auto skyboxShader = AssetManager::GetShader(m_ScyboxShader);
-		m_Skybox->Render(skyboxShader);
-		RenderCommand::CullFaces(true);
+			m_ScreenFrameBuffer->Unbind();
+			RenderCommand::SetClearColor({ 1.f, 1.f, 1.f, 1.f });
+			RenderCommand::Clear();
 
-		auto lightShader = AssetManager::GetShader(m_LightSourceShader);
-		for (const auto& ls : m_LightSources)
-			ls->Render(lightShader);
-
-		m_ScreenFrameBuffer->Unbind();
-		RenderCommand::SetClearColor({ 1.f, 1.f, 1.f, 1.f });
-		RenderCommand::Clear();
-
-		auto screenShader = AssetManager::GetShader(m_ScreenShader);
-		screenShader->Bind();
-		screenShader->UploadUniformFloat("u_dbgPPOffset", m_DbgPPOffset);
-		screenShader->UploadUniformInt("u_dbgPPEffect", m_DbgPPEffect);
-		m_ScreenQuad->Render(screenShader);
+			auto screenShader = AssetManager::GetShader(m_ScreenShader);
+			screenShader->Bind();
+			screenShader->UploadUniformFloat("u_dbgPPOffset", m_DbgPPOffset);
+			screenShader->UploadUniformInt("u_dbgPPEffect", m_DbgPPEffect);
+			m_ScreenQuad->Render(screenShader);
+		}
+		else
+		{
+			RenderScene();
+		}
 
 		Renderer::EndScene();
 
@@ -178,6 +174,7 @@ public:
 		ImGui::SliderFloat("Spot light quadratic", &sl.quadratic, 0.f, 0.001f);
 
 		ImGui::Checkbox("Disable normal mapping", &m_DbgDisableNormalMapping);
+		ImGui::Checkbox("Enable post processing", &m_EnablePostProcessing);
 
 		ImGui::SliderFloat("Post proc offset", &m_DbgPPOffset, 0.f, 0.01f);
 		ImGui::SliderInt("Post proc effect", &m_DbgPPEffect, 0, 3);
@@ -214,6 +211,27 @@ public:
 	void OnEvent(Event& event) override
 	{
 	}
+
+	void RenderScene()
+	{
+		auto defaultShader = AssetManager::GetShader(m_DefaultShader);
+		defaultShader->Bind();
+		defaultShader->UploadUniformsDefaultLighting(m_ScnLight, m_Camera.GetPosition());
+		defaultShader->UploadUniformInt("u_dbgDisableNormalMapping", m_DbgDisableNormalMapping ? 1 : 0);
+
+		m_Model->SetTransform(glm::mat4(1.f));
+		m_Model->Render(defaultShader);
+
+		RenderCommand::CullFaces(false);
+		auto skyboxShader = AssetManager::GetShader(m_ScyboxShader);
+		m_Skybox->Render(skyboxShader);
+		RenderCommand::CullFaces(true);
+
+		auto lightShader = AssetManager::GetShader(m_LightSourceShader);
+		for (const auto& ls : m_LightSources)
+			ls->Render(lightShader);
+	}
+
 private:
 	SceneLight m_ScnLight;
 	SPtr<Scn::Model> m_Model;
@@ -229,6 +247,8 @@ private:
 	std::string m_ScyboxShader = "default_skybox";
 
 	SPtr<FrameBuffer> m_ScreenFrameBuffer;
+	bool m_PostProcessReady = false;
+	bool m_EnablePostProcessing = false;
 
 	FlyCamera m_Camera;
 };

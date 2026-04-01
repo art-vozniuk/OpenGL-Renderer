@@ -16,6 +16,7 @@ namespace Engine {
 		stbi_uc* data = stbi_load(path.c_str(), &width, &height, &channels, 0);
 		if (!data)
 		{
+			ERROR_CORE("Texture failed to load at path: {0}", path);
 			static unsigned char fallback[] = { 0, 0, 0, 255 };
 			Init(fallback, 1, 1, 4);
 			return;

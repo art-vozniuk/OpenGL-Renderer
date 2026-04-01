@@ -18,6 +18,12 @@ namespace Engine {
 			return fs::path(ENGINE_ASSETS_DIR);
 		}
 
+		std::string NormalizeAssetPath(std::string path)
+		{
+			std::replace(path.begin(), path.end(), '\\', '/');
+			return path;
+		}
+
 	}
 
 	SPtr<Shader> ShaderCreator::Get(const std::string& name)
@@ -52,7 +58,8 @@ namespace Engine {
 
 	SPtr<Texture2D> TextureCreator::Get(const std::string& name)
 	{
-		const std::string filename = fs::path(name).filename().string();
+		const std::string normalizedPath = NormalizeAssetPath(name);
+		const std::string filename = fs::path(normalizedPath).filename().string();
 
 		const auto it = m_Data.find(filename);
 		if (it != m_Data.end()) {
