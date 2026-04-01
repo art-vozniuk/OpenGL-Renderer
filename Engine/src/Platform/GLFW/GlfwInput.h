@@ -5,7 +5,7 @@
 
 namespace Engine {
 
-	class WindowsInput : public Input
+	class GlfwInput : public Input
 	{
 	public:
 		Position m_ScrollState;

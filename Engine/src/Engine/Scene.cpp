@@ -179,6 +179,9 @@ namespace Engine {
 			for (const auto& t : m_Material->GetTextures()) {
 				switch (t->GetType())
 				{
+				case Texture::Type::None:
+				case Texture::Type::Ambient:
+					break;
 				case Texture::Type::Diffuse:
 					shader->UploadUniformInt("u_material.diffuse", 0);
 					t->GetRenderTex()->Bind(0);

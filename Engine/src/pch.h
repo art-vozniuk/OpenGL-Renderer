@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <utility>
@@ -15,6 +16,6 @@
 #include "Engine/Log.h"
 #include "Core.h"
 
-#ifdef PLATFORM_WINDOWS
+#ifdef _WIN32
 #include <Windows.h>
 #endif

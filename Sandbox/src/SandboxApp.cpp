@@ -1,10 +1,10 @@
 #include <Engine.h>
 
-#include "imgui/imgui.h"
+#include "imgui.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include "GLFW/include/GLFW/glfw3.h"
+#include <GLFW/glfw3.h>
 
 #include <cmath>
 #include "Engine/FlyCamera.h"

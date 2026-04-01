@@ -16,8 +16,8 @@ namespace Engine {
 		virtual void AddVertexBuffer(const SPtr<VertexBuffer>& vertexBuffer) override;
 		virtual void SetIndexBuffer(const SPtr<IndexBuffer>& indexBuffer) override;
 
-		virtual const std::vector<SPtr<VertexBuffer>>& GetVertexBuffers() const { return m_VertexBuffers; }
-		virtual const SPtr<IndexBuffer>& GetIndexBuffer() const { return m_IndexBuffer; }
+		const std::vector<SPtr<VertexBuffer>>& GetVertexBuffers() const override { return m_VertexBuffers; }
+		const SPtr<IndexBuffer>& GetIndexBuffer() const override { return m_IndexBuffer; }
 	private:
 		uint m_RendererID;
 		uint m_VertexBufferIndex = 0;

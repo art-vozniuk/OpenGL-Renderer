@@ -1,23 +1,53 @@
-#  Mini OpenGL renderer
+# Mini OpenGL Renderer
 
- - Basic Phong shading
- - Post-processing
- - Normal mapping
- - Cubemaps
- - Asset loading using Assimp
- - .FBX/.OBJ models support
- - ImGui integrated
- 
-#  Setup
- 
- - Execute GenerateProjects.bat
- - Open solution with VS2019
- - Build solution and run
- - Use right mouse button + WASD to controll the camera
- - Use ImGui menu Settings for scene and renderer customization
- 
- Sponza(the default scene)
-![engine](https://user-images.githubusercontent.com/46974918/72377151-47204600-3720-11ea-89be-b51a6841f892.png)
- 
- Postprocessing kernel effect
-![engine2](https://user-images.githubusercontent.com/46974918/72377720-0ffe6480-3721-11ea-8696-d65e30324346.png)
+OpenGL scene renderer and sandbox application built around a small custom engine.
+
+Current focus:
+- CMake-based workflow
+- macOS support
+- OpenGL-only renderer
+- CLion-friendly project layout
+
+Features:
+- Phong lighting
+- Normal mapping
+- Cubemaps / skybox
+- Post-processing with framebuffer passes
+- Asset loading through Assimp
+- ImGui runtime controls
+
+## Requirements
+
+- CMake 3.25+
+- A C++17 compiler
+- macOS with Xcode / AppleClang
+
+## Build
+
+From the repository root:
+
+```bash
+cmake -S . -B build
+cmake --build build --target Sandbox -j 8
+```
+
+Run:
+
+```bash
+./build/Sandbox
+```
+
+## CLion
+
+Open the repository root in CLion. The root `CMakeLists.txt` is the only build entry point you need.
+
+## Notes
+
+- The project now uses the vendored dependencies through CMake.
+- Asset paths are resolved from the repository `assets` directory, so launching from CLion or the terminal uses the same asset base.
+- The old Premake / Visual Studio / Vulkan scaffolding has been removed from the main project tree.
+
+## Controls
+
+- Hold right mouse button and use `W`, `A`, `S`, `D` to move the camera
+- Use the ImGui `Settings` panel for renderer and scene controls

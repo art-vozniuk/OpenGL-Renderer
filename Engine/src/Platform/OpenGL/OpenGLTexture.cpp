@@ -14,10 +14,13 @@ namespace Engine {
 		int width, height, channels;
 		//stbi_set_flip_vertically_on_load(1);
 		stbi_uc* data = stbi_load(path.c_str(), &width, &height, &channels, 0);
-		if (!data) {
-			data = stbi_load("../assets/textures/black.png", &width, &height, &channels, 0);
+		if (!data)
+		{
+			static unsigned char fallback[] = { 0, 0, 0, 255 };
+			Init(fallback, 1, 1, 4);
+			return;
 		}
-		CORE_ASSERT(data, "Failed to load image!");
+
 		Init(data, width, height, channels);
 		stbi_image_free(data);
 	}
@@ -57,17 +60,19 @@ namespace Engine {
 		glGenerateMipmap(GL_TEXTURE_2D);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY, GL_MAX_TEXTURE_MAX_ANISOTROPY);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 	}
 
 	void OpenGLTexture2D::Bind(uint slot) const
 	{
-		glBindTextureUnit(slot, m_RendererID);
+		glActiveTexture(GL_TEXTURE0 + slot);
+		glBindTexture(GL_TEXTURE_2D, m_RendererID);
 	}
 
 	OpenGLCubeMap::OpenGLCubeMap(const std::vector<std::string>& paths)
 	{
-		ASSERT(paths.size() == 6);
+		ASSERT(paths.size() == 6, "Cubemap requires 6 faces");
 
 		glGenTextures(1, &m_RendererID);
 		glBindTexture(GL_TEXTURE_CUBE_MAP, m_RendererID);
@@ -79,6 +84,8 @@ namespace Engine {
 			unsigned char* data = stbi_load(paths[i].c_str(), &width, &height, &channels, 0);
 			if (data)
 			{
+				m_Width = width;
+				m_Height = height;
 				glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i,
 					0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data
 				);
@@ -103,6 +110,7 @@ namespace Engine {
 
 	void OpenGLCubeMap::Bind(uint slot /*= 0*/) const
 	{
+		glActiveTexture(GL_TEXTURE0 + slot);
 		glBindTexture(GL_TEXTURE_CUBE_MAP, m_RendererID);
 	}
 

@@ -1,6 +1,7 @@
 
 .vs/
 .idea/
+build/
 bin-int/
 bin/
 *.sln

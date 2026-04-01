@@ -23,6 +23,7 @@ namespace Engine {
 	{
 		uint size = 0;
 		switch (type) {
+		case ShaderDataType::None:     break;
 		case ShaderDataType::Float:    size = 4;		 break;
 		case ShaderDataType::Float2:   size = 4 * 2;	 break;
 		case ShaderDataType::Float3:   size = 4 * 3;	 break;
@@ -59,6 +60,7 @@ namespace Engine {
 		{
 			switch (Type)
 			{
+			case ShaderDataType::None:    break;
 			case ShaderDataType::Float:   return 1;
 			case ShaderDataType::Float2:  return 2;
 			case ShaderDataType::Float3:  return 3;

@@ -9,6 +9,7 @@ namespace Engine {
 	{
 		switch (type)
 		{
+		case Engine::ShaderDataType::None:      break;
 		case Engine::ShaderDataType::Float:    return GL_FLOAT;
 		case Engine::ShaderDataType::Float2:   return GL_FLOAT;
 		case Engine::ShaderDataType::Float3:   return GL_FLOAT;
@@ -28,7 +29,7 @@ namespace Engine {
 
 	OpenGLVertexArray::OpenGLVertexArray()
 	{
-		glCreateVertexArrays(1, &m_RendererID);
+		glGenVertexArrays(1, &m_RendererID);
 	}
 
 	OpenGLVertexArray::~OpenGLVertexArray()

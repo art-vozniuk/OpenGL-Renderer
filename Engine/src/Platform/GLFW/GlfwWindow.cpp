@@ -1,12 +1,11 @@
 #include "pch.h"
-#include "WindowsWindow.h"
+#include "GlfwWindow.h"
 
 #include "Engine/Events/ApplicationEvent.h"
 #include "Engine/Events/MouseEvent.h"
 #include "Engine/Events/KeyEvent.h"
 
 #include "Platform/OpenGL/OpenGLContext.h"
-#include "Platform/Vulkan/VulkanContext.h"
 
 namespace Engine {
 
@@ -19,20 +18,20 @@ namespace Engine {
 
 	Window* Window::Create(const WindowProps& props)
 	{
-		return new WindowsWindow(props);
+		return new GlfwWindow(props);
 	}
 
-	WindowsWindow::WindowsWindow(const WindowProps& props)
+	GlfwWindow::GlfwWindow(const WindowProps& props)
 	{
 		Init(props);
 	}
 
-	WindowsWindow::~WindowsWindow()
+	GlfwWindow::~GlfwWindow()
 	{
 		Shutdown();
 	}
 
-	void WindowsWindow::Init(const WindowProps& props)
+	void GlfwWindow::Init(const WindowProps& props)
 	{
 		m_Data.Title = props.Title;
 		m_Data.Width = props.Width;
@@ -49,13 +48,19 @@ namespace Engine {
 			s_GLFWInitialized = true;
 		}
 
+		glfwDefaultWindowHints();
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+		glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#ifdef __APPLE__
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+		glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#endif
+
 		m_Window = glfwCreateWindow((int)props.Width, (int)props.Height, m_Data.Title.c_str(), nullptr, nullptr);
 
-#if VULKAN
-		m_Context = new VulkanContext(m_Window);
-#else
 		m_Context = new OpenGLContext(m_Window);
-#endif
 		m_Context->Init();
 
 		glfwSetWindowUserPointer(m_Window, &m_Data);
@@ -152,18 +157,18 @@ namespace Engine {
 			});
 	}
 
-	void WindowsWindow::Shutdown()
+	void GlfwWindow::Shutdown()
 	{
 		glfwDestroyWindow(m_Window);
 	}
 
-	void WindowsWindow::OnUpdate()
+	void GlfwWindow::OnUpdate()
 	{
 		glfwPollEvents();
 		m_Context->SwapBuffers();
 	}
 
-	void WindowsWindow::SetVSync(bool enabled)
+	void GlfwWindow::SetVSync(bool enabled)
 	{
 		if (enabled)
 			glfwSwapInterval(1);
@@ -173,7 +178,7 @@ namespace Engine {
 		m_Data.VSync = enabled;
 	}
 
-	bool WindowsWindow::IsVSync() const
+	bool GlfwWindow::IsVSync() const
 	{
 		return m_Data.VSync;
 	}

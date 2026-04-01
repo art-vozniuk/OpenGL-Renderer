@@ -12,7 +12,7 @@ namespace Engine {
 	OpenGLVertexBuffer::OpenGLVertexBuffer(float* vertices, uint size)
 		: m_size(size)
 	{
-		glCreateBuffers(1, &m_RendererID);
+		glGenBuffers(1, &m_RendererID);
 		glBindBuffer(GL_ARRAY_BUFFER, m_RendererID);
 		glBufferData(GL_ARRAY_BUFFER, size, vertices, GL_STATIC_DRAW);
 	}
@@ -39,7 +39,7 @@ namespace Engine {
 	OpenGLIndexBuffer::OpenGLIndexBuffer(uint* indices, uint count)
 		: m_Count(count)
 	{
-		glCreateBuffers(1, &m_RendererID);
+		glGenBuffers(1, &m_RendererID);
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_RendererID);
 		glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * sizeof(uint), indices, GL_STATIC_DRAW);
 	}
@@ -94,7 +94,7 @@ namespace Engine {
 
 	bool OpenGLFrameBuffer::Check() const
 	{
-		return (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE);
+		return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
 	}
 
 	OpenGLRenderBuffer::OpenGLRenderBuffer(uint windth, uint heigth)

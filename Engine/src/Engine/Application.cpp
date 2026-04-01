@@ -7,7 +7,7 @@
 
 #include "Input.h"
 
-#include <glfw/glfw3.h>
+#include <GLFW/glfw3.h>
 
 namespace Engine {
 
@@ -23,10 +23,8 @@ namespace Engine {
 
 		Renderer::Init();
 
-#if !VULKAN
 		m_ImGuiLayer = new ImGuiLayer();
 		PushOverlay(m_ImGuiLayer);
-#endif
 	}
 
 	void Application::PushLayer(Layer* layer)
@@ -64,12 +62,10 @@ namespace Engine {
 			for (Layer* layer : m_LayerStack)
 				layer->OnUpdate(timestep);
 
-#if !VULKAN
 			m_ImGuiLayer->Begin();
 			for (Layer* layer : m_LayerStack)
 				layer->OnImGuiRender();
 			m_ImGuiLayer->End();
-#endif
 
 			Input::OnUpdate();
 			m_Window->OnUpdate();
