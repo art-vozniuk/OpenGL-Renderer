@@ -3,8 +3,12 @@
 
 #include "stb_image.h"
 
+#ifndef __EMSCRIPTEN__
 #include <glad/glad.h>
 #include "assimp/texture.h"
+#else
+#include <GLES3/gl3.h>
+#endif
 
 namespace Engine {
 

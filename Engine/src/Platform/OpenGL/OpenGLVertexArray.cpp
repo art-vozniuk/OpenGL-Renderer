@@ -1,7 +1,11 @@
 #include "pch.h"
 #include "OpenGLVertexArray.h"
 
+#ifndef __EMSCRIPTEN__
 #include <glad/glad.h>
+#else
+#include <GLES3/gl3.h>
+#endif
 
 namespace Engine {
 

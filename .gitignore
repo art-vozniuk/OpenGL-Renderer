@@ -2,8 +2,10 @@
 .vs/
 .idea/
 build/
+build-web/
 bin-int/
 bin/
+.DS_Store
 *.sln
 .gitattributes
 *.vcxproj

@@ -1,7 +1,9 @@
 #pragma once
 
 #include "pch.h"
+#ifndef __EMSCRIPTEN__
 #include "assimp/scene.h"
+#endif
 #include "glm/gtx/mixed_product.hpp"
 #include "Renderer/VertexArray.h"
 #include "Renderer/Shader.h"
@@ -41,7 +43,9 @@ namespace Engine {
 			Texture(const SPtr<Engine::Texture>& tex)
 				: m_RenderTex(tex) { }
 
+#ifndef __EMSCRIPTEN__
 			static aiTextureType ConvertType(Type type);
+#endif
 			bool IsLoaded(void) const { return m_RenderTex.get(); }
 			void Load(void);
 			const std::string& GetName(void) const { return m_Name; }
@@ -61,7 +65,12 @@ namespace Engine {
 		{
 		public:
 			Mesh(void) {};
+			// Programmatic constructor (used by tinygltf loader on web)
+			Mesh(std::vector<Vertex>&& verts, std::vector<Face>&& faces,
+			     const glm::mat4& transform, const SPtr<Material>& material);
+#ifndef __EMSCRIPTEN__
 			Mesh(const aiMesh* mesh, const glm::mat4& transform, const glm::mat4& parentTransform, const SPtr<Material>& material);
+#endif
 
 			virtual ~Mesh() = default;
 
@@ -92,7 +101,14 @@ namespace Engine {
 		class Model
 		{
 		public:
+			// Programmatic constructor (used by tinygltf loader on web)
+			Model() = default;
+#ifndef __EMSCRIPTEN__
 			Model(const aiScene* scene);
+#endif
+
+			void AddMesh(const SPtr<Mesh>& mesh) { m_Meshes.push_back(mesh); }
+			void AddMaterial(const SPtr<Material>& material) { m_Materials.push_back(material); }
 
 			SPtr<Texture> GetTexture(uint idx) { return m_Textures[idx]; }
 			void Render(void) { for (auto& m : m_Meshes) m->Render(); }
@@ -106,7 +122,9 @@ namespace Engine {
 			void SetTransform(const glm::mat4& transform);
 
 		private:
+#ifndef __EMSCRIPTEN__
 			void ProcessNode(const aiNode* node, const aiScene* scene);
+#endif
 
 			glm::mat4 m_Transform = glm::mat4(1.f);
 
@@ -122,7 +140,12 @@ namespace Engine {
 			using TextureList = std::vector<SPtr<Texture>>;
 
 			Material(void) : m_Shader("default"), m_Name("Material") { }
+			// Programmatic constructor (used by tinygltf loader on web)
+			Material(const std::string& name, const std::string& shader = "default")
+				: m_Shader(shader), m_Name(name) { }
+#ifndef __EMSCRIPTEN__
 			Material(const aiMaterial* material, Model& model, const std::string& shader = "default");
+#endif
 
 			const TextureList& GetTextures(void) const { return m_Textures; }
 			const std::string& GetName(void) const { return m_Name; }
@@ -130,7 +153,9 @@ namespace Engine {
 			void AddTexture(const SPtr<Texture>& tex) { m_Textures.emplace_back(tex); }
 
 		private:
+#ifndef __EMSCRIPTEN__
 			void LoadTextures(const aiMaterial* material, Model& model, Texture::Type type);
+#endif
 
 			std::string m_Shader;
 			std::string m_Name;

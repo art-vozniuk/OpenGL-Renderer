@@ -1,7 +1,11 @@
 #include "pch.h"
 #include "OpenGLShader.h"
 
+#ifndef __EMSCRIPTEN__
 #include <glad/glad.h>
+#else
+#include <GLES3/gl3.h>
+#endif
 
 #include <glm/gtc/type_ptr.hpp>
 

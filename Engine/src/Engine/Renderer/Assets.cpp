@@ -3,8 +3,12 @@
 #include "Renderer.h"
 
 #include <filesystem>
+#ifndef __EMSCRIPTEN__
 #include "assimp/Importer.hpp"
 #include "assimp/postprocess.h"
+#else
+#include "GltfLoader.h"
+#endif
 
 
 namespace Engine {
@@ -48,11 +52,15 @@ namespace Engine {
 	{
 		switch (Renderer::GetAPI())
 		{
-		case RendererAPI::API::None:    CORE_ASSERT(false, "RendererAPI::None is currently not supported!"); return nullptr;
+		case RendererAPI::API::None:    CORE_ASSERT(false, "RendererAPI::None is currently not supported!"); return "";
+#ifndef __EMSCRIPTEN__
 		case RendererAPI::API::OpenGL:  return ".glsl";
+#else
+		case RendererAPI::API::OpenGL:  return "_es.glsl";
+#endif
 		}
 		CORE_ASSERT(false, "Unknown RendererAPI!");
-		return nullptr;
+		return "";
 	}
 
 
@@ -66,8 +74,20 @@ namespace Engine {
 			return it->second;
 		}
 
-		static const fs::path texturesPath = GetAssetsDir() / "textures" / "sponza";
-		auto tex = Texture2D::Create((texturesPath / filename).string());
+		// If the caller passed a full / rooted path (e.g. from GltfLoader), use
+		// it directly; otherwise fall back to the legacy textures/sponza location.
+		fs::path resolved;
+		if (fs::path(normalizedPath).has_parent_path() &&
+		    normalizedPath.find('/') != std::string::npos)
+		{
+			resolved = fs::path(normalizedPath);
+		}
+		else
+		{
+			static const fs::path texturesPath = GetAssetsDir() / "textures" / "sponza";
+			resolved = texturesPath / filename;
+		}
+		auto tex = Texture2D::Create(resolved.string());
 		m_Data.emplace(filename, tex);
 
 		return tex;
@@ -107,13 +127,18 @@ namespace Engine {
 
 		const fs::path path = GetAssetsDir() / "models" / name;
 
+#ifndef __EMSCRIPTEN__
 		Assimp::Importer importer;
 		const aiScene* scene = importer.ReadFile(path.string().c_str(), aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_CalcTangentSpace);
 		ASSERT(scene, "Model loading failed: {0}", path.string());
 
 		auto model = MakeShared<Scn::Model>(scene);
-		m_Data.emplace(name, model);
+#else
+		auto model = GltfLoader::Load(path.string());
+		ASSERT(model, "glTF model loading failed: {0}", path.string());
+#endif
 
+		m_Data.emplace(name, model);
 		return model;
 	}
 

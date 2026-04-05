@@ -7,6 +7,7 @@ namespace Engine {
 	namespace Scn {
 
 
+#ifndef __EMSCRIPTEN__
 		static void VecAssimpToGlm(const aiVector3D& aVec, glm::vec3& gVec)
 		{
 			for (uint i = 0; i < 3; ++i) {
@@ -41,6 +42,7 @@ namespace Engine {
 			m_Meshes.reserve(scene->mNumMeshes);
 			ProcessNode(scene->mRootNode, scene);
 		}
+#endif // !__EMSCRIPTEN__
 
 
 		SPtr<Material> Model::GetMaterial(const std::string& name)
@@ -78,6 +80,7 @@ namespace Engine {
 		}
 
 
+#ifndef __EMSCRIPTEN__
 		void Model::ProcessNode(const aiNode* node, const aiScene* scene)
 		{
 			glm::mat4 transform;
@@ -124,6 +127,20 @@ namespace Engine {
 				}
 			}
 
+			SetupRenderable();
+		}
+#endif // !__EMSCRIPTEN__
+
+
+		// Programmatic constructor: used by GltfLoader (web) or any future procedural loader
+		Mesh::Mesh(std::vector<Vertex>&& verts, std::vector<Face>&& faces,
+		           const glm::mat4& transform, const SPtr<Material>& material)
+			: m_LocalTransform(transform)
+			, m_Material(material)
+		{
+			m_WorldTransform = transform;
+			m_Verts = std::move(verts);
+			m_Faces = std::move(faces);
 			SetupRenderable();
 		}
 
@@ -245,6 +262,7 @@ namespace Engine {
 			cubemap->Bind();
 		}
 
+#ifndef __EMSCRIPTEN__
 		Material::Material(const aiMaterial* material, Model& model, const std::string& shader)
 			: m_Shader(shader)
 			, m_Name(material->mName)
@@ -295,6 +313,7 @@ namespace Engine {
 			}
 			return aiTextureType_UNKNOWN;
 		}
+#endif // !__EMSCRIPTEN__
 
 
 		void Texture::Load(void)

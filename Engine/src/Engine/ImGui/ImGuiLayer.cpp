@@ -9,7 +9,9 @@
 
 // TEMPORARY
 #include <GLFW/glfw3.h>
+#ifndef __EMSCRIPTEN__
 #include <glad/glad.h>
+#endif
 
 namespace ImGui
 {
@@ -33,7 +35,9 @@ namespace Engine {
 		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;       // Enable Keyboard Controls
 		//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;           // Enable Docking
+#ifndef __EMSCRIPTEN__
 		io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows
+#endif
 		//io.ConfigFlags |= ImGuiConfigFlags_ViewportsNoTaskBarIcons;
 		//io.ConfigFlags |= ImGuiConfigFlags_ViewportsNoMerge;
 
@@ -54,7 +58,11 @@ namespace Engine {
 
 		// Setup Platform/Renderer bindings
 		ImGui_ImplGlfw_InitForOpenGL(window, true);
+#ifndef __EMSCRIPTEN__
 		ImGui_ImplOpenGL3_Init("#version 410");
+#else
+		ImGui_ImplOpenGL3_Init("#version 300 es");
+#endif
 	}
 
 	void ImGuiLayer::OnDetach()

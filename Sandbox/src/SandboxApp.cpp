@@ -9,9 +9,11 @@
 #include <cmath>
 #include "Engine/FlyCamera.h"
 
+#ifndef __EMSCRIPTEN__
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
+#endif
 
 #include "Engine/Scene.h"
 #include "Engine/Lighting.h"
@@ -28,7 +30,11 @@ public:
 	ExampleLayer(float screenWidth, float screenHeight)
 		: Layer("Example")
 	{
+#ifndef __EMSCRIPTEN__
 		m_Model = AssetManager::GetModel("sponza/sponza.obj");
+#else
+		m_Model = AssetManager::GetModel("sponza/sponza.gltf");
+#endif
 
 		m_Camera.SetPerspective(glm::radians(45.0f), screenWidth / screenHeight, 0.1f, 10000.0f);
 

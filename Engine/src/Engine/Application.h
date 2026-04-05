@@ -20,6 +20,7 @@ namespace Engine {
 		virtual ~Application() = default;
 
 		void Run();
+		void RunOneFrame();
 
 		void OnEvent(Event& e);
 

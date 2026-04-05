@@ -7,7 +7,12 @@
 
 #include "Input.h"
 
+#ifndef __EMSCRIPTEN__
 #include <GLFW/glfw3.h>
+#else
+#include <GLFW/glfw3.h>
+#include <emscripten/emscripten.h>
+#endif
 
 namespace Engine {
 
@@ -50,26 +55,43 @@ namespace Engine {
 		}
 	}
 
+	void Application::RunOneFrame()
+	{
+		float time = (float)glfwGetTime();
+		Timestep timestep = time - m_LastFrameTime;
+		m_LastFrameTime = time;
+
+		for (Layer* layer : m_LayerStack)
+			layer->OnUpdate(timestep);
+
+		m_ImGuiLayer->Begin();
+		for (Layer* layer : m_LayerStack)
+			layer->OnImGuiRender();
+		m_ImGuiLayer->End();
+
+		Input::OnUpdate();
+		m_Window->OnUpdate();
+	}
+
+#ifdef __EMSCRIPTEN__
+	static void EmscriptenMainLoop(void* arg)
+	{
+		Application* app = static_cast<Application*>(arg);
+		app->RunOneFrame();
+	}
+#endif
+
 	void Application::Run()
 	{
 		Input::Init();
+#ifdef __EMSCRIPTEN__
+		// Hand control to the browser — 0 fps means use requestAnimationFrame,
+		// simulate_infinite_loop=1 so main() doesn't return prematurely.
+		emscripten_set_main_loop_arg(EmscriptenMainLoop, this, 0, 1);
+#else
 		while (m_Running)
-		{
-			float time = (float)glfwGetTime();
-			Timestep timestep = time - m_LastFrameTime;
-			m_LastFrameTime = time;
-
-			for (Layer* layer : m_LayerStack)
-				layer->OnUpdate(timestep);
-
-			m_ImGuiLayer->Begin();
-			for (Layer* layer : m_LayerStack)
-				layer->OnImGuiRender();
-			m_ImGuiLayer->End();
-
-			Input::OnUpdate();
-			m_Window->OnUpdate();
-		}
+			RunOneFrame();
+#endif
 	}
 
 	bool Application::OnWindowClose(WindowCloseEvent& e)

@@ -49,14 +49,19 @@ namespace Engine {
 		}
 
 		glfwDefaultWindowHints();
+#ifndef __EMSCRIPTEN__
+		// Desktop: OpenGL 3.3 Core (or 4.1 on Apple)
 		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
 		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
 		glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-#ifdef __APPLE__
+#  ifdef __APPLE__
 		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
 		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 		glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#  endif
 #endif
+		// On Emscripten / contrib.glfw3 no extra hints are needed:
+		// WebGL version is controlled by -sMAX_WEBGL_VERSION=2 linker flag.
 
 		m_Window = glfwCreateWindow((int)props.Width, (int)props.Height, m_Data.Title.c_str(), nullptr, nullptr);
 

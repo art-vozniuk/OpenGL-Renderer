@@ -439,6 +439,55 @@ struct char8_t {
   }
 };
 
+// Emscripten's libc++ (Clang 20+) requires std::char_traits to be explicitly
+// specialised for any custom type used with std::basic_string_view.
+// We step outside the fmt namespace to add the specialisation.
+#ifdef __EMSCRIPTEN__
+FMT_END_NAMESPACE
+namespace std {
+template<> struct char_traits<fmt::char8_t> {
+  using char_type  = fmt::char8_t;
+  using int_type   = unsigned int;
+  using off_type   = std::streamoff;
+  using pos_type   = std::streampos;
+  using state_type = std::mbstate_t;
+
+  static constexpr void assign(char_type& r, const char_type& a) noexcept { r = a; }
+  static constexpr bool eq(char_type a, char_type b) noexcept { return a.value == b.value; }
+  static constexpr bool lt(char_type a, char_type b) noexcept { return a.value < b.value; }
+  static int compare(const char_type* s1, const char_type* s2, std::size_t n) {
+    for (std::size_t i = 0; i < n; ++i) {
+      if (lt(s1[i], s2[i])) return -1;
+      if (lt(s2[i], s1[i])) return  1;
+    }
+    return 0;
+  }
+  static std::size_t length(const char_type* s) {
+    std::size_t n = 0; while (s[n].value) ++n; return n;
+  }
+  static const char_type* find(const char_type* s, std::size_t n, const char_type& a) {
+    for (std::size_t i = 0; i < n; ++i) if (eq(s[i], a)) return s + i;
+    return nullptr;
+  }
+  static char_type* move(char_type* s1, const char_type* s2, std::size_t n) {
+    return static_cast<char_type*>(std::memmove(s1, s2, n * sizeof(char_type)));
+  }
+  static char_type* copy(char_type* s1, const char_type* s2, std::size_t n) {
+    return static_cast<char_type*>(std::memcpy(s1, s2, n * sizeof(char_type)));
+  }
+  static char_type* assign(char_type* s, std::size_t n, char_type a) {
+    for (std::size_t i = 0; i < n; ++i) s[i] = a; return s;
+  }
+  static constexpr char_type to_char_type(int_type c) noexcept { return char_type{static_cast<char>(c)}; }
+  static constexpr int_type  to_int_type(char_type c) noexcept { return static_cast<unsigned char>(c.value); }
+  static constexpr bool      eq_int_type(int_type c1, int_type c2) noexcept { return c1 == c2; }
+  static constexpr int_type  eof() noexcept { return ~int_type(0); }
+  static constexpr int_type  not_eof(int_type c) noexcept { return c == eof() ? 0u : c; }
+};
+}  // namespace std
+FMT_BEGIN_NAMESPACE
+#endif  // __EMSCRIPTEN__
+
 // A UTF-8 string view.
 class u8string_view : public basic_string_view<char8_t> {
  private:

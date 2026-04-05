@@ -2,7 +2,11 @@
 #include "OpenGLContext.h"
 
 #include <GLFW/glfw3.h>
+#ifndef __EMSCRIPTEN__
 #include <glad/glad.h>
+#else
+#include <GLES3/gl3.h>
+#endif
 
 namespace Engine {
 
@@ -15,8 +19,10 @@ namespace Engine {
 	void OpenGLContext::Init()
 	{
 		glfwMakeContextCurrent(m_WindowHandle);
+#ifndef __EMSCRIPTEN__
 		int status = gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
 		CORE_ASSERT(status, "Failed to initialize Glad!");
+#endif
 
 		INFO_CORE("OpenGL Info:");
 		INFO_CORE("  Vendor: {0}", glGetString(GL_VENDOR));
