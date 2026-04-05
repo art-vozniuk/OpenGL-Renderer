@@ -5,8 +5,6 @@ OpenGL scene renderer and sandbox application built around a small custom engine
 Current focus:
 - CMake-based workflow
 - macOS support
-- OpenGL-only renderer
-- CLion-friendly project layout
 
 Features:
 - Phong lighting
@@ -36,16 +34,6 @@ Run:
 ```bash
 ./build/Sandbox
 ```
-
-## CLion
-
-Open the repository root in CLion. The root `CMakeLists.txt` is the only build entry point you need.
-
-## Notes
-
-- The project now uses the vendored dependencies through CMake.
-- Asset paths are resolved from the repository `assets` directory, so launching from CLion or the terminal uses the same asset base.
-- The old Premake / Visual Studio / Vulkan scaffolding has been removed from the main project tree.
 
 ## Controls
 
