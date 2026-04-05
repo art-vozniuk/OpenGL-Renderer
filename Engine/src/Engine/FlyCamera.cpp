@@ -3,6 +3,12 @@
 #include "Input.h"
 #include "KeyCodes.h"
 
+#ifdef __EMSCRIPTEN__
+constexpr float maxMoveSpeed = 1.f;
+#else
+constexpr float maxMoveSpeed = 5000.f;
+#endif
+
 namespace Engine {
 
 
@@ -23,7 +29,7 @@ namespace Engine {
 		}
 
 		m_MoveSpeed += Input::GetScroll().second * 10.f;
-		m_MoveSpeed = glm::clamp(m_MoveSpeed, 0.1f, 1.f);
+		m_MoveSpeed = glm::clamp(m_MoveSpeed, 0.1f, maxMoveSpeed);
 
 		static float yaw = -90.f;
 		static float pitch = 0.f;

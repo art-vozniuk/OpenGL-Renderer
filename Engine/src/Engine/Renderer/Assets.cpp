@@ -74,11 +74,11 @@ namespace Engine {
 			return it->second;
 		}
 
-		// If the caller passed a full / rooted path (e.g. from GltfLoader), use
-		// it directly; otherwise fall back to the legacy textures/sponza location.
+		// If the caller passed an absolute path (GltfLoader passes /assets/models/…),
+		// use it directly; otherwise fall back to the legacy textures/sponza location
+		// (Assimp passes relative paths like "textures/foo.png").
 		fs::path resolved;
-		if (fs::path(normalizedPath).has_parent_path() &&
-		    normalizedPath.find('/') != std::string::npos)
+		if (fs::path(normalizedPath).is_absolute())
 		{
 			resolved = fs::path(normalizedPath);
 		}
