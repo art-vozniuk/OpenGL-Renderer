@@ -28,8 +28,10 @@ namespace Engine {
 
 		Renderer::Init();
 
+#ifndef __EMSCRIPTEN__
 		m_ImGuiLayer = new ImGuiLayer();
 		PushOverlay(m_ImGuiLayer);
+#endif
 	}
 
 	void Application::PushLayer(Layer* layer)
@@ -64,10 +66,12 @@ namespace Engine {
 		for (Layer* layer : m_LayerStack)
 			layer->OnUpdate(timestep);
 
+#ifndef __EMSCRIPTEN__
 		m_ImGuiLayer->Begin();
 		for (Layer* layer : m_LayerStack)
 			layer->OnImGuiRender();
 		m_ImGuiLayer->End();
+#endif
 
 		Input::OnUpdate();
 		m_Window->OnUpdate();

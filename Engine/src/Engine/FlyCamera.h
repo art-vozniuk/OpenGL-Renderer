@@ -24,12 +24,12 @@ namespace Engine {
 
 		const SPtr<Camera>	GetRenderCamera(void) const { return m_Camera; }
 
-		float m_MoveSpeed = 200.0f;
+		float m_MoveSpeed = 1.0f;
 		float m_RotationSpeed = 0.13f;
 
 	private:
 		SPtr<Camera> m_Camera;
-		glm::mat4 m_Transform = glm::translate(glm::mat4(1.f), glm::vec3(0.f, 14.f, 10.f));
+		glm::mat4 m_Transform = glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.5f, 0.f));
 	};
 
 }
