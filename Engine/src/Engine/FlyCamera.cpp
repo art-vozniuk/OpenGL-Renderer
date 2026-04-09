@@ -60,10 +60,12 @@ namespace Engine {
 		else if (Input::IsKeyPressed(KEY_D))
 			pos += right * (m_MoveSpeed * ts);
 
+		// Move along XZ plane (ground) regardless of pitch
+		glm::vec3 frwXZ = glm::normalize(glm::vec3(frw.x, 0.f, frw.z));
 		if (Input::IsKeyPressed(KEY_W))
-			pos += frw * (m_MoveSpeed * ts);
+			pos += frwXZ * (m_MoveSpeed * ts);
 		else if (Input::IsKeyPressed(KEY_S))
-			pos -= frw * (m_MoveSpeed * ts);
+			pos -= frwXZ * (m_MoveSpeed * ts);
 
 		if (Input::IsKeyPressed(KEY_E))
 			pos += up * (m_MoveSpeed * ts);

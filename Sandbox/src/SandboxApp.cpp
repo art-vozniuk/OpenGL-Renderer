@@ -59,13 +59,13 @@ public:
 		dl.specular = glm::vec3(0.5f, 0.5f, 0.5f);
 
 		auto& pl = m_ScnLight.pointLights[0];
-		pl.position = glm::vec3(6.f, 14.f, 0.f);
-		pl.ambient = glm::vec3(1.f, 1.f, 1.f);
+		pl.position = glm::vec3(0.f, 1.5f, 0.f);
+		pl.ambient = glm::vec3(0.05f, 0.05f, 0.05f);
 		pl.diffuse = glm::vec3(0.8f, 0.8f, 0.8f);
 		pl.specular = glm::vec3(1.0f, 1.0f, 1.0f);
 		pl.constant = 1.0f;
-		pl.linear = 0.00009f;
-		pl.quadratic = 0.000032f;
+		pl.linear = 0.09f;
+		pl.quadratic = 0.32f;
 
 		auto& sl = m_ScnLight.spotLights[0];
 		sl.position = m_Camera.GetPosition();
@@ -80,7 +80,7 @@ public:
 		sl.outerCutOff = glm::cos(glm::radians(15.0f));
 
 		for (const auto& l : m_ScnLight.pointLights)
-			m_LightSources.emplace_back(std::make_shared<Scn::Cube>(glm::translate(glm::mat4(1.f), l.position), 1.f));
+			m_LightSources.emplace_back(std::make_shared<Scn::Cube>(glm::translate(glm::mat4(1.f), l.position), 0.05f));
 
 		m_ScreenFrameBuffer.reset(FrameBuffer::Create());
 		m_ScreenFrameBuffer->Bind();
@@ -164,7 +164,7 @@ public:
 		ImGui::ColorEdit3("Dir light diffuse", glm::value_ptr(dl.diffuse));
 		ImGui::ColorEdit3("Dir light specular", glm::value_ptr(dl.specular));
 
-		ImGui::SliderFloat3("Point light position", glm::value_ptr(pl.position), -1500.f, 1500.f);
+		ImGui::SliderFloat3("Point light position", glm::value_ptr(pl.position), -12.f, 12.f);
 		ImGui::ColorEdit3("Point light ambient", glm::value_ptr(pl.ambient));
 		ImGui::ColorEdit3("Point light diffuse", glm::value_ptr(pl.diffuse));
 		ImGui::ColorEdit3("Point light specular", glm::value_ptr(pl.specular));
@@ -190,11 +190,11 @@ public:
 
 	void AnimatePointLight(Timestep ts)
 	{
-		constexpr float max_x = 1100.f;
-		constexpr float max_z = 150.f;
-		constexpr float y = 200.f;
-		constexpr float speed_x = 100.f;
-		constexpr float speed_z = 50.f;
+		constexpr float max_x = 8.f;
+		constexpr float max_z = 1.2f;
+		constexpr float y = 1.5f;
+		constexpr float speed_x = 0.8f;
+		constexpr float speed_z = 0.4f;
 
 		static int direction_x = 1;
 		static int direction_z = 1;
