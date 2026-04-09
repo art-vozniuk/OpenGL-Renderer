@@ -1,4 +1,4 @@
-# Mini OpenGL Renderer
+# OpenGL Renderer
 <img width="1460" height="839" alt="image" src="https://github.com/user-attachments/assets/e9491f87-3b90-42d1-9013-a9a49f0e4b50" />
 
 OpenGL scene renderer and sandbox application built around a small custom engine.
