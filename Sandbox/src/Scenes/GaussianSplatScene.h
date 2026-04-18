@@ -1,17 +1,20 @@
 #pragma once
 
 #include "SceneBase.h"
+
 #include "Engine/FlyCamera.h"
+#include "Engine/Renderer/GaussianSplatRenderer.h"
+
+#include <memory>
 
 namespace Sandbox {
 
 	/*
-	 * GaussianSplatScene (placeholder)
-	 * --------------------------------
-	 * Stub scene registered under the "gsplat" id. Currently just clears to
-	 * a distinctive color and wires the fly-camera so we can verify that the
-	 * scene-selection plumbing reaches the renderer. Will be fleshed out in
-	 * a follow-up pass that adds actual splat loading + rendering.
+	 * GaussianSplatScene
+	 * ------------------
+	 * Renders a single static Gaussian-splat scene loaded from an
+	 * antimatter15-format .splat file. Phase 1 milestone — no streaming,
+	 * no CPU sort yet (alpha blend artifacts are expected on this pass).
 	 */
 	class GaussianSplatScene final : public SceneBase
 	{
@@ -23,6 +26,8 @@ namespace Sandbox {
 
 	private:
 		Engine::FlyCamera m_Camera;
+		std::unique_ptr<Engine::GaussianSplatRenderer> m_Splats;
+		size_t m_SplatCount = 0;
 	};
 
 }
