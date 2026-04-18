@@ -118,9 +118,15 @@ namespace Sandbox {
 
 	void GaussianSplatScene::OnImGuiRender()
 	{
+		ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
+
 		ImGui::Begin("Gaussian Splat");
 		ImGui::Text("Splats: %zu", m_SplatCount);
 		ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+		ImGui::Separator();
+		const glm::vec3 eye = m_Camera.GetPosition();
+		ImGui::Text("Eye: (%.1f, %.1f, %.1f)", eye.x, eye.y, eye.z);
 		ImGui::End();
 	}
 

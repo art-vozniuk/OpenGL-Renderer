@@ -29,8 +29,8 @@ namespace Engine {
 		Renderer::Init();
 
 #ifndef __EMSCRIPTEN__
-		//m_ImGuiLayer = new ImGuiLayer();
-		//PushOverlay(m_ImGuiLayer);
+		m_ImGuiLayer = new ImGuiLayer();
+		PushOverlay(m_ImGuiLayer);
 #endif
 	}
 
@@ -67,10 +67,10 @@ namespace Engine {
 			layer->OnUpdate(timestep);
 
 #ifndef __EMSCRIPTEN__
-		/*m_ImGuiLayer->Begin();
+		m_ImGuiLayer->Begin();
 		for (Layer* layer : m_LayerStack)
 			layer->OnImGuiRender();
-		m_ImGuiLayer->End();*/
+		m_ImGuiLayer->End();
 #endif
 
 		Input::OnUpdate();

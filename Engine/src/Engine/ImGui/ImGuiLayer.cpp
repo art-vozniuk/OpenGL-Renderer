@@ -32,14 +32,12 @@ namespace Engine {
 		IMGUI_CHECKVERSION();
 		ImGui::CreateContext();
 		ImGuiIO& io = ImGui::GetIO(); (void)io;
-		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;       // Enable Keyboard Controls
-		//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;           // Enable Docking
-#ifndef __EMSCRIPTEN__
-		io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows
-#endif
-		//io.ConfigFlags |= ImGuiConfigFlags_ViewportsNoTaskBarIcons;
-		//io.ConfigFlags |= ImGuiConfigFlags_ViewportsNoMerge;
+		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+		// Viewports (multi-OS-window) are deliberately disabled: without
+		// UpdatePlatformWindows / RenderPlatformWindowsDefault the viewport
+		// windows silently disappear. Single-window rendering is sufficient
+		// for our debug panel.
 
 		// Setup Dear ImGui style
 		ImGui::StyleColorsDark();
@@ -74,6 +72,16 @@ namespace Engine {
 
 	void ImGuiLayer::Begin()
 	{
+		// DisplaySize MUST be set before NewFrame — ImGui uses it for all
+		// layout / clipping calculations in the frame. On macOS the first
+		// frame used to see DisplaySize=0 because we only assigned it in
+		// End(), which made every SetNextWindowPos fall off-screen until
+		// the user manually resized the native window.
+		ImGuiIO& io = ImGui::GetIO();
+		Application& app = Application::Get();
+		io.DisplaySize = ImVec2((float)app.GetWindow().GetWidth(),
+		                        (float)app.GetWindow().GetHeight());
+
 		ImGui_ImplOpenGL3_NewFrame();
 		ImGui_ImplGlfw_NewFrame();
 		ImGui::NewFrame();
@@ -81,27 +89,13 @@ namespace Engine {
 
 	void ImGuiLayer::End()
 	{
-		ImGuiIO& io = ImGui::GetIO();
-		Application& app = Application::Get();
-		io.DisplaySize = ImVec2((float)app.GetWindow().GetWidth(), (float)app.GetWindow().GetHeight());
-
-		// Rendering
 		ImGui::Render();
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
-		if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-		{
-			GLFWwindow* backup_current_context = glfwGetCurrentContext();
-			//ImGui::UpdatePlatformWindows();
-			//ImGui::RenderPlatformWindowsDefault();
-			glfwMakeContextCurrent(backup_current_context);
-		}
 	}
 
 	void ImGuiLayer::OnImGuiRender()
 	{
-		static bool show = true;
-		ImGui::ShowDemoWindow(&show);
+		// No always-on demo window — each scene draws its own debug panel.
 	}
 
 }
