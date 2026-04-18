@@ -25,13 +25,7 @@ namespace Sandbox {
 		, m_Skybox(std::make_shared<Scn::SkyBox>())
 		, m_ScreenQuad(std::make_shared<Scn::Quad>(glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.f, 0.f))))
 	{
-		// Pick the right asset for the platform (Assimp-friendly vs tinygltf-friendly).
-	#ifndef __EMSCRIPTEN__
-		m_Model = AssetManager::GetModel("sponza/sponza.obj");
-	#else
 		m_Model = AssetManager::GetModel("sponza/sponza.gltf");
-	#endif
-
 		m_Camera.SetPerspective(glm::radians(45.0f), m_ScreenWidth / m_ScreenHeight, 0.1f, 10000.0f);
 
 		auto cubeMap = AssetManager::GetCubemap("cube2");

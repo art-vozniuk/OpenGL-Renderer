@@ -1,14 +1,9 @@
 #include "pch.h"
 #include "Assets.h"
 #include "Renderer.h"
+#include "GltfLoader.h"
 
 #include <filesystem>
-#ifndef __EMSCRIPTEN__
-#include "assimp/Importer.hpp"
-#include "assimp/postprocess.h"
-#else
-#include "GltfLoader.h"
-#endif
 
 
 namespace Engine {
@@ -62,20 +57,10 @@ namespace Engine {
 			return it->second;
 		}
 
-		// If the caller passed an absolute path (GltfLoader passes /assets/models/…),
-		// use it directly; otherwise fall back to the legacy textures/sponza location
-		// (Assimp passes relative paths like "textures/foo.png").
-		fs::path resolved;
-		if (fs::path(normalizedPath).is_absolute())
-		{
-			resolved = fs::path(normalizedPath);
-		}
-		else
-		{
-			static const fs::path texturesPath = GetAssetsDir() / "textures" / "sponza";
-			resolved = texturesPath / filename;
-		}
-		auto tex = Texture2D::Create(resolved.string());
+		// GltfLoader resolves each texture URI against the glTF's base
+		// directory and passes the full path in, so we always receive an
+		// absolute path here.
+		auto tex = Texture2D::Create(normalizedPath);
 		m_Data.emplace(filename, tex);
 
 		return tex;
@@ -114,17 +99,8 @@ namespace Engine {
 		}
 
 		const fs::path path = GetAssetsDir() / "models" / name;
-
-#ifndef __EMSCRIPTEN__
-		Assimp::Importer importer;
-		const aiScene* scene = importer.ReadFile(path.string().c_str(), aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_CalcTangentSpace);
-		ASSERT(scene, "Model loading failed: {0}", path.string());
-
-		auto model = MakeShared<Scn::Model>(scene);
-#else
 		auto model = GltfLoader::Load(path.string());
 		ASSERT(model, "glTF model loading failed: {0}", path.string());
-#endif
 
 		m_Data.emplace(name, model);
 		return model;

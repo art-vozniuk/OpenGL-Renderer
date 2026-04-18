@@ -12,7 +12,21 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(OPENGL_RENDERER_BUILD_SANDBOX "Build the Sandbox executable" ON)
 
 # ============================================================
-#  NATIVE-ONLY dependencies
+#  Model loader (tinygltf, header-only) — shared between targets
+# ============================================================
+include(FetchContent)
+set(TINYGLTF_HEADER_ONLY ON  CACHE INTERNAL "")
+set(TINYGLTF_INSTALL     OFF CACHE INTERNAL "")
+FetchContent_Declare(
+    tinygltf
+    GIT_REPOSITORY https://github.com/syoyo/tinygltf.git
+    GIT_TAG        v2.9.3
+    GIT_SHALLOW    ON
+)
+FetchContent_MakeAvailable(tinygltf)
+
+# ============================================================
+#  NATIVE-ONLY dependencies (GLFW window + GLAD loader)
 # ============================================================
 if(NOT EMSCRIPTEN)
     set(CMAKE_DISABLE_FIND_PACKAGE_Vulkan ON)
@@ -23,45 +37,13 @@ if(NOT EMSCRIPTEN)
     set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
     set(GLFW_VULKAN_STATIC  OFF CACHE BOOL "" FORCE)
 
-    set(BUILD_SHARED_LIBS           OFF CACHE BOOL "" FORCE)
-    set(ASSIMP_BUILD_ASSIMP_TOOLS   OFF CACHE BOOL "" FORCE)
-    set(ASSIMP_BUILD_SAMPLES        OFF CACHE BOOL "" FORCE)
-    set(ASSIMP_BUILD_TESTS          OFF CACHE BOOL "" FORCE)
-    set(ASSIMP_NO_EXPORT            ON  CACHE BOOL "" FORCE)
-    set(ASSIMP_BUILD_ZLIB           OFF CACHE BOOL "" FORCE)
-    set(BUILD_DOCS                  OFF CACHE BOOL "" FORCE)
-
     add_subdirectory(Engine/vendor/GLFW EXCLUDE_FROM_ALL)
-    add_subdirectory(Engine/vendor/assimp EXCLUDE_FROM_ALL)
-
-    if(TARGET assimp)
-        target_compile_definitions(assimp PRIVATE
-            ASSIMP_BUILD_NO_OWN_ZLIB
-            MINIZ_NO_ZLIB_COMPATIBLE_NAMES
-        )
-    endif()
 
     find_package(OpenGL REQUIRED)
 
     add_library(Glad STATIC Engine/vendor/Glad/src/glad.c)
     target_include_directories(Glad SYSTEM PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/Glad/include")
-endif()
-
-# ============================================================
-#  WEB — tinygltf via FetchContent
-# ============================================================
-if(EMSCRIPTEN)
-    include(FetchContent)
-    set(TINYGLTF_HEADER_ONLY ON  CACHE INTERNAL "")
-    set(TINYGLTF_INSTALL     OFF CACHE INTERNAL "")
-    FetchContent_Declare(
-        tinygltf
-        GIT_REPOSITORY https://github.com/syoyo/tinygltf.git
-        GIT_TAG        v2.9.3
-        GIT_SHALLOW    ON
-    )
-    FetchContent_MakeAvailable(tinygltf)
 endif()
 
 # ============================================================
@@ -141,15 +123,15 @@ target_include_directories(Engine SYSTEM PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/stb_image"
 )
 
+# tinygltf header lives in the fetched source tree; shared between both targets.
+target_include_directories(Engine SYSTEM PUBLIC
+    "${tinygltf_SOURCE_DIR}"
+)
+
 if(NOT EMSCRIPTEN)
     target_include_directories(Engine SYSTEM PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/Glad/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/GLFW/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/assimp/include"
-    )
-else()
-    target_include_directories(Engine SYSTEM PUBLIC
-        "${tinygltf_SOURCE_DIR}"
     )
 endif()
 
@@ -160,7 +142,6 @@ if(NOT EMSCRIPTEN)
             Glad
             ImGui
             OpenGL::GL
-            assimp
             glfw
             vendor_glm
             vendor_spdlog

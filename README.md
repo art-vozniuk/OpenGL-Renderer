@@ -14,7 +14,7 @@ Real-time 3D scene renderer built around a custom C++ engine.
 - Normal mapping
 - Cubemaps / skybox
 - Post-processing with framebuffer passes
-- Asset loading through Assimp (native) and tinygltf (web)
+- Asset loading through tinygltf
 - ImGui runtime controls (native)
 
 ## Requirements

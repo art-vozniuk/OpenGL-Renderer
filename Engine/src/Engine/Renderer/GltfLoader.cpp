@@ -1,5 +1,3 @@
-#ifdef __EMSCRIPTEN__
-
 #include "pch.h"
 #include "GltfLoader.h"
 #include "Assets.h"
@@ -290,5 +288,3 @@ SPtr<Scn::Model> GltfLoader::Load(const std::string& path)
 }
 
 } // namespace Engine
-
-#endif // __EMSCRIPTEN__

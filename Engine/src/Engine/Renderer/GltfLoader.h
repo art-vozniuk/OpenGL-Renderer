@@ -1,7 +1,5 @@
 #pragma once
 
-#ifdef __EMSCRIPTEN__
-
 #include "pch.h"
 #include "../Scene.h"
 
@@ -16,5 +14,3 @@ namespace Engine {
 	};
 
 } // namespace Engine
-
-#endif // __EMSCRIPTEN__
