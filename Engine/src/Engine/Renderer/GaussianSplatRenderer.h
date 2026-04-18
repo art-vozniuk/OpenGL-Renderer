@@ -6,6 +6,7 @@
 #include "../Core.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace Engine {
 
@@ -51,6 +52,16 @@ namespace Engine {
 		void CreateInstanceBuffers();
 		void DestroyGpuResources();
 
+		// Sort splats back-to-front relative to the camera and upload the
+		// reordered per-instance data to the GPU. Expensive (~50 ms for 1 M
+		// splats); caller is responsible for throttling.
+		void Sort(const glm::mat4& viewMatrix);
+
+		// Returns true if the camera has moved enough since the last sort
+		// that the visual ordering would drift. Used to trigger debounced
+		// re-sorts without wasting cycles on a static view.
+		bool NeedsResort(const glm::mat4& viewMatrix) const;
+
 		// GL handles. Held as uint32_t to avoid leaking <glad>/<GLES3> from
 		// this header into translation units that don't need them.
 		uint32_t m_Vao = 0;
@@ -61,6 +72,28 @@ namespace Engine {
 		uint32_t m_ScaleVbo = 0;
 		uint32_t m_RotVbo   = 0;
 		uint32_t m_ColorVbo = 0;
+
+		// CPU-side copies of the original per-splat data, kept so the sorter
+		// can reorder rows without round-tripping through the GPU. These are
+		// also the source of truth for recomputing depths each sort pass.
+		std::vector<glm::vec3>   m_Positions;
+		std::vector<glm::vec3>   m_Scales;
+		std::vector<glm::vec4>   m_Rotations;
+		std::vector<glm::u8vec4> m_Colors;
+
+		// Scratch storage for the permutation + per-sort reshuffle. Kept as
+		// members so we don't pay for alloc/free every sort.
+		std::vector<uint32_t>    m_SortIndices;
+		std::vector<glm::vec3>   m_ScratchVec3;
+		std::vector<glm::vec4>   m_ScratchVec4;
+		std::vector<glm::u8vec4> m_ScratchRgba;
+		std::vector<float>       m_Depths;
+
+		// Last view matrix used for sorting — NeedsResort() compares against
+		// the current view to decide whether the existing order is still
+		// good enough.
+		glm::mat4 m_LastSortView{1.0f};
+		bool      m_SortValid = false;
 
 		size_t m_Count = 0;
 	};

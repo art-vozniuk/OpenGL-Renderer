@@ -20,23 +20,40 @@ namespace Sandbox {
 
 	namespace {
 
-		// Simple axis-aligned bounds — used to place the fly camera somewhere
-		// from which the splat cloud is actually visible at app start.
+		// Percentile-trimmed axis-aligned bounds — used to place the fly
+		// camera somewhere from which the splat cloud is actually visible
+		// at app start. Trained splat scenes contain a handful of outlier
+		// Gaussians at sky/background ranges that would otherwise inflate
+		// min/max bounds by 5-10x and put the camera too far away.
 		struct Bounds {
-			glm::vec3 min{std::numeric_limits<float>::max()};
-			glm::vec3 max{std::numeric_limits<float>::lowest()};
+			glm::vec3 min{0.0f};
+			glm::vec3 max{0.0f};
 
 			glm::vec3 Centre() const { return 0.5f * (min + max); }
 			glm::vec3 Size()   const { return max - min; }
 			float     Radius() const { return 0.5f * glm::length(Size()); }
 		};
 
-		Bounds ComputeBounds(const SplatData& d)
+		// Returns the P-th / (1-P)-th percentile on each axis independently.
+		// Using 5% / 95% kills the top-and-bottom 5% of outliers per axis
+		// which is enough to recover a sane bbox for typical reconstructed
+		// Gaussian scenes.
+		Bounds ComputeBounds(const SplatData& d, float trim = 0.05f)
 		{
 			Bounds b;
-			for (const auto& p : d.positions) {
-				b.min = glm::min(b.min, p);
-				b.max = glm::max(b.max, p);
+			if (d.Empty()) return b;
+
+			std::vector<float> buf(d.positions.size());
+			for (int axis = 0; axis < 3; ++axis) {
+				for (size_t i = 0; i < d.positions.size(); ++i) buf[i] = d.positions[i][axis];
+				size_t lo = static_cast<size_t>(buf.size() * trim);
+				size_t hi = buf.size() - 1 - lo;
+				std::nth_element(buf.begin(), buf.begin() + lo, buf.end());
+				float lowVal = buf[lo];
+				std::nth_element(buf.begin() + lo + 1, buf.begin() + hi, buf.end());
+				float highVal = buf[hi];
+				b.min[axis] = lowVal;
+				b.max[axis] = highVal;
 			}
 			return b;
 		}
@@ -60,14 +77,17 @@ namespace Sandbox {
 		}
 		m_SplatCount = data.Count();
 
-		// Place the camera so the whole cloud fits in view. Position is
-		// roughly `centre + (0, 0, radius * 2)` looking toward the centre.
+		// Place the camera so the whole cloud fits comfortably in view.
+		// Using ~3 × radius gives enough margin that the splats read as a
+		// distinct object rather than filling the viewport from inside.
 		const Bounds b = ComputeBounds(data);
 		const glm::vec3 centre = b.Centre();
 		const float radius = std::max(b.Radius(), 1.0f);
-		const glm::vec3 eye = centre + glm::vec3(0.0f, 0.0f, radius * 2.0f);
-		INFO_CORE("gsplat bounds: centre=({0},{1},{2}) radius={3}",
-		          centre.x, centre.y, centre.z, radius);
+		const glm::vec3 eye = centre + glm::vec3(0.0f, 0.0f, radius * 3.0f);
+		INFO_CORE("gsplat bbox: min=({0},{1},{2}) max=({3},{4},{5})",
+		          b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+		INFO_CORE("gsplat camera: eye=({0},{1},{2}) lookAt=({3},{4},{5}) r={6}",
+		          eye.x, eye.y, eye.z, centre.x, centre.y, centre.z, radius);
 		m_Camera.SetTransform(glm::inverse(glm::lookAt(eye, centre, glm::vec3(0.0f, 1.0f, 0.0f))));
 		m_Camera.m_MoveSpeed = radius * 0.5f;  // scale WASD speed with scene
 

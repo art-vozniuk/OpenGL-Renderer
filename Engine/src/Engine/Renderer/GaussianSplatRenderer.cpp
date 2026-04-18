@@ -9,6 +9,8 @@
 #endif
 
 #include <glm/gtc/type_ptr.hpp>
+#include <algorithm>
+#include <numeric>
 
 namespace Engine {
 
@@ -109,24 +111,133 @@ namespace Engine {
 			return;
 		}
 
+		// Keep a CPU copy — the back-to-front sorter reshuffles these each
+		// time the camera moves, and recomputing depths requires positions
+		// on the CPU side anyway.
+		m_Positions = data.positions;
+		m_Scales    = data.scales;
+		m_Rotations = data.rotations;
+		m_Colors    = data.colors;
+
+		// Pre-size scratch buffers to the maximum we'll need during a sort.
+		m_SortIndices.resize(m_Count);
+		m_ScratchVec3.resize(m_Count);
+		m_ScratchVec4.resize(m_Count);
+		m_ScratchRgba.resize(m_Count);
+		m_Depths.resize(m_Count);
+		std::iota(m_SortIndices.begin(), m_SortIndices.end(), uint32_t{0});
+
 		const GLsizeiptr vec3Bytes = static_cast<GLsizeiptr>(m_Count * sizeof(glm::vec3));
 		const GLsizeiptr vec4Bytes = static_cast<GLsizeiptr>(m_Count * sizeof(glm::vec4));
 		const GLsizeiptr rgbaBytes = static_cast<GLsizeiptr>(m_Count * sizeof(glm::u8vec4));
 
+		// DYNAMIC_DRAW because Sort() will re-upload these whenever the
+		// camera moves enough to change the blend order.
 		glBindBuffer(GL_ARRAY_BUFFER, m_PosVbo);
-		glBufferData(GL_ARRAY_BUFFER, vec3Bytes, data.positions.data(), GL_STATIC_DRAW);
+		glBufferData(GL_ARRAY_BUFFER, vec3Bytes, data.positions.data(), GL_DYNAMIC_DRAW);
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_ScaleVbo);
-		glBufferData(GL_ARRAY_BUFFER, vec3Bytes, data.scales.data(), GL_STATIC_DRAW);
+		glBufferData(GL_ARRAY_BUFFER, vec3Bytes, data.scales.data(), GL_DYNAMIC_DRAW);
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_RotVbo);
-		glBufferData(GL_ARRAY_BUFFER, vec4Bytes, data.rotations.data(), GL_STATIC_DRAW);
+		glBufferData(GL_ARRAY_BUFFER, vec4Bytes, data.rotations.data(), GL_DYNAMIC_DRAW);
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_ColorVbo);
-		glBufferData(GL_ARRAY_BUFFER, rgbaBytes, data.colors.data(), GL_STATIC_DRAW);
+		glBufferData(GL_ARRAY_BUFFER, rgbaBytes, data.colors.data(), GL_DYNAMIC_DRAW);
 
 		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		m_SortValid = false;  // force a fresh sort on the first Render()
 		INFO_CORE("GaussianSplatRenderer: uploaded {0} splats to GPU", (uint64_t)m_Count);
+	}
+
+
+	bool GaussianSplatRenderer::NeedsResort(const glm::mat4& viewMatrix) const
+	{
+		if (!m_SortValid) return true;
+
+		// Compare forward vectors and positions between the last-sorted view
+		// and the current one. The forward vector is the third row of the
+		// view matrix's rotation part (GL's forward is -Z in camera space,
+		// so the world-space forward is -view[ 2 ][.xyz]).
+		const glm::vec3 fOld(-m_LastSortView[0][2], -m_LastSortView[1][2], -m_LastSortView[2][2]);
+		const glm::vec3 fNew(-viewMatrix[0][2],      -viewMatrix[1][2],      -viewMatrix[2][2]);
+		const glm::vec3 pOld = -glm::vec3(m_LastSortView[3]);  // approx (view is world→cam)
+		const glm::vec3 pNew = -glm::vec3(viewMatrix[3]);
+
+		// Thresholds scaled to the cloud footprint — we haven't got that
+		// here so use conservative constants that avoid thrashing on tiny
+		// camera drifts but catch meaningful rotations / translations.
+		const float kDotThreshold = 0.999f;   // ~2.5° rotation
+		const float kPosThreshold = 0.5f;     // world-space units
+		return glm::dot(fOld, fNew) < kDotThreshold
+		    || glm::length(pOld - pNew) > kPosThreshold;
+	}
+
+
+	void GaussianSplatRenderer::Sort(const glm::mat4& viewMatrix)
+	{
+		if (m_Count == 0) return;
+
+		// 1. Compute depth per splat in view space. Only the z component is
+		//    needed; we multiply by the relevant column vectors directly
+		//    instead of the full mat4 * vec4 to keep the inner loop tight.
+		const float a = viewMatrix[0][2];
+		const float b = viewMatrix[1][2];
+		const float c = viewMatrix[2][2];
+		const float d = viewMatrix[3][2];
+		for (size_t i = 0; i < m_Count; ++i) {
+			const glm::vec3& p = m_Positions[i];
+			m_Depths[i] = a * p.x + b * p.y + c * p.z + d;
+		}
+
+		// 2. Sort indices so that the LATER-drawn splats are the FURTHEST
+		//    from the camera. GL view-space forward is -Z so "further" means
+		//    "more negative depth"; we therefore sort descending by depth
+		//    (the biggest — closest to zero — value comes first in the
+		//    instance iteration, and the most negative — furthest away —
+		//    comes last).
+		//
+		//    Why this direction: with glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+		//    and the reference WebGL gsplat viewers, the visually correct
+		//    result on train.splat is achieved when instance[N-1] is the
+		//    furthest splat. Switching to ascending produces a washed-out
+		//    "grey fog" dominated by outlier splats drawn on top. See
+		//    antimatter15/splat for the same convention.
+		std::iota(m_SortIndices.begin(), m_SortIndices.end(), uint32_t{0});
+		std::sort(m_SortIndices.begin(), m_SortIndices.end(),
+		          [this](uint32_t i, uint32_t j) { return m_Depths[i] > m_Depths[j]; });
+
+		// 3. Reshuffle each per-instance VBO's data via the permutation and
+		//    re-upload. Using scratch buffers the same size as the source
+		//    avoids alloc traffic in the hot path.
+		for (size_t i = 0; i < m_Count; ++i) m_ScratchVec3[i] = m_Positions[m_SortIndices[i]];
+		glBindBuffer(GL_ARRAY_BUFFER, m_PosVbo);
+		glBufferSubData(GL_ARRAY_BUFFER, 0,
+		                static_cast<GLsizeiptr>(m_Count * sizeof(glm::vec3)),
+		                m_ScratchVec3.data());
+
+		for (size_t i = 0; i < m_Count; ++i) m_ScratchVec3[i] = m_Scales[m_SortIndices[i]];
+		glBindBuffer(GL_ARRAY_BUFFER, m_ScaleVbo);
+		glBufferSubData(GL_ARRAY_BUFFER, 0,
+		                static_cast<GLsizeiptr>(m_Count * sizeof(glm::vec3)),
+		                m_ScratchVec3.data());
+
+		for (size_t i = 0; i < m_Count; ++i) m_ScratchVec4[i] = m_Rotations[m_SortIndices[i]];
+		glBindBuffer(GL_ARRAY_BUFFER, m_RotVbo);
+		glBufferSubData(GL_ARRAY_BUFFER, 0,
+		                static_cast<GLsizeiptr>(m_Count * sizeof(glm::vec4)),
+		                m_ScratchVec4.data());
+
+		for (size_t i = 0; i < m_Count; ++i) m_ScratchRgba[i] = m_Colors[m_SortIndices[i]];
+		glBindBuffer(GL_ARRAY_BUFFER, m_ColorVbo);
+		glBufferSubData(GL_ARRAY_BUFFER, 0,
+		                static_cast<GLsizeiptr>(m_Count * sizeof(glm::u8vec4)),
+		                m_ScratchRgba.data());
+
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+		m_LastSortView = viewMatrix;
+		m_SortValid = true;
 	}
 
 
@@ -134,9 +245,14 @@ namespace Engine {
 	{
 		if (m_Count == 0) return;
 
+		const glm::mat4& view = camera->GetViewMatrix();
+		if (NeedsResort(view)) {
+			Sort(view);
+		}
+
 		auto shader = AssetManager::GetShader("gsplat");
 		shader->Bind();
-		shader->UploadUniformMat4("u_View", camera->GetViewMatrix());
+		shader->UploadUniformMat4("u_View", view);
 		shader->UploadUniformMat4("u_Projection", camera->GetProjectionMatrix());
 		shader->UploadUniformFloat2("u_ViewportSize", viewportSize);
 
