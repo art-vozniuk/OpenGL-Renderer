@@ -46,7 +46,7 @@ namespace Sandbox {
 
 		std::unordered_map<std::string, Factory> m_Factories;
 		std::vector<std::string> m_Ids;
-		std::string m_DefaultId = "sponza";
+		std::string m_DefaultId = "gsplat";
 	};
 
 
