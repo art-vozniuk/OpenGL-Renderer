@@ -47,6 +47,28 @@ namespace Engine {
 
 		size_t SplatCount() const { return m_Count; }
 
+		// Runs an immediate back-to-front sort outside the render loop.
+		// Call once after Upload() + initial camera setup so the first
+		// visible frame is already sorted (otherwise the first frame
+		// renders in file order and only gets sorted on frame 2).
+		void SortNow(const glm::mat4& viewMatrix) { Sort(viewMatrix); }
+
+		// Per-stage timing snapshot — the GUI reads this each frame to show
+		// a "max over the last N seconds" number for each phase. A stage
+		// with a zero sample this frame (e.g. no sort ran) is ignored when
+		// computing the rolling max.
+		struct PerfStats {
+			float sortMs      = 0.0f;  // std::sort + index build
+			float reshuffleMs = 0.0f;  // CPU scratch-buffer reorder
+			float uploadMs    = 0.0f;  // 4x glBufferSubData
+			float drawMs      = 0.0f;  // glDrawElementsInstanced + glFinish
+		};
+
+		PerfStats LastFrame() const { return m_LastFrame; }
+
+		// Rolling max over ~5 s of the per-stage measurements above.
+		PerfStats MaxLast5s() const;
+
 	private:
 		void CreateQuadMesh();
 		void CreateInstanceBuffers();
@@ -84,6 +106,9 @@ namespace Engine {
 		// Scratch storage for the permutation + per-sort reshuffle. Kept as
 		// members so we don't pay for alloc/free every sort.
 		std::vector<uint32_t>    m_SortIndices;
+		std::vector<uint32_t>    m_SortIndicesScratch;  // radix-sort ping-pong buffer
+		std::vector<uint32_t>    m_SortKeys;            // depths cast to sortable uint32
+		std::vector<uint32_t>    m_SortKeysScratch;
 		std::vector<glm::vec3>   m_ScratchVec3;
 		std::vector<glm::vec4>   m_ScratchVec4;
 		std::vector<glm::u8vec4> m_ScratchRgba;
@@ -95,7 +120,19 @@ namespace Engine {
 		glm::mat4 m_LastSortView{1.0f};
 		bool      m_SortValid = false;
 
+		// Motion detection: sort runs only on the frame after the camera
+		// comes to rest. We keep the previous-frame view to diff against
+		// the current view, plus a boolean recording whether motion was
+		// observed last frame.
+		glm::mat4 m_LastObservedView{1.0f};
+		bool      m_WasMovingLastFrame = false;
+
 		size_t m_Count = 0;
+
+		// Timing buffers. We keep up to ~5 s of history at 60 fps ≈ 300 frames.
+		PerfStats              m_LastFrame;
+		std::vector<PerfStats> m_History;
+		size_t                 m_HistoryHead = 0;
 	};
 
 }

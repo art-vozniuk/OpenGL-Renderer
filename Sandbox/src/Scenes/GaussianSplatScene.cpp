@@ -61,15 +61,38 @@ namespace Sandbox {
 	}
 
 
+	namespace {
+
+		// Per-scene spawn. Captured by flying the fly-cam to a pleasing
+		// angle and reading the Eye / Fwd lines from the ImGui panel.
+		struct GsplatSceneSpawn {
+			const char* file;
+			glm::vec3   eye;   // world-space camera position
+			glm::vec3   fwd;   // world-space forward direction (unit)
+		};
+
+		// When we add more scenes we'll look this up by id on the
+		// SceneBase; for now train.splat is the only option.
+		static const GsplatSceneSpawn kTrainSpawn = {
+			"splat/train.splat",
+			/*eye=*/ glm::vec3(-4.60f,  0.70f,  4.30f),
+			/*fwd=*/ glm::vec3( 0.49f, -0.14f, -0.86f),
+		};
+
+	}
+
+
 	GaussianSplatScene::GaussianSplatScene(float screenWidth, float screenHeight)
 		: SceneBase("gsplat", screenWidth, screenHeight)
 	{
+		const GsplatSceneSpawn& spawn = kTrainSpawn;
+
 		m_Camera.SetPerspective(glm::radians(45.0f), m_ScreenWidth / m_ScreenHeight, 0.1f, 10000.0f);
 
 		// Load splats from assets/splat/ — packaged into Sandbox.data on web,
 		// resolved via ENGINE_ASSETS_DIR on native.
 		namespace fs = std::filesystem;
-		const fs::path splatPath = fs::path(ENGINE_ASSETS_DIR) / "splat" / "train.splat";
+		const fs::path splatPath = fs::path(ENGINE_ASSETS_DIR) / spawn.file;
 		auto data = SplatLoader::LoadSplat(splatPath.string());
 		if (data.Empty()) {
 			ERROR_CORE("GaussianSplatScene: failed to load {0}", splatPath.string());
@@ -77,22 +100,25 @@ namespace Sandbox {
 		}
 		m_SplatCount = data.Count();
 
-		// Place the camera so the whole cloud fits comfortably in view.
-		// Using ~3 × radius gives enough margin that the splats read as a
-		// distinct object rather than filling the viewport from inside.
 		const Bounds b = ComputeBounds(data);
-		const glm::vec3 centre = b.Centre();
 		const float radius = std::max(b.Radius(), 1.0f);
-		const glm::vec3 eye = centre + glm::vec3(0.0f, 0.0f, radius * 3.0f);
+		const glm::vec3 eye = spawn.eye;
+		const glm::vec3 fwd = glm::normalize(spawn.fwd);
 		INFO_CORE("gsplat bbox: min=({0},{1},{2}) max=({3},{4},{5})",
 		          b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
-		INFO_CORE("gsplat camera: eye=({0},{1},{2}) lookAt=({3},{4},{5}) r={6}",
-		          eye.x, eye.y, eye.z, centre.x, centre.y, centre.z, radius);
-		m_Camera.SetTransform(glm::inverse(glm::lookAt(eye, centre, glm::vec3(0.0f, 1.0f, 0.0f))));
-		m_Camera.m_MoveSpeed = radius * 0.5f;  // scale WASD speed with scene
+		INFO_CORE("gsplat spawn: eye=({0},{1},{2}) fwd=({3},{4},{5})",
+		          eye.x, eye.y, eye.z, fwd.x, fwd.y, fwd.z);
+		// Splats are already converted to +Y-up by SplatLoader. The look-at
+		// target is just `eye + fwd` — lookAt only cares about direction.
+		m_Camera.SetTransform(glm::inverse(glm::lookAt(eye, eye + fwd, glm::vec3(0.0f, 1.0f, 0.0f))));
+		m_Camera.m_MoveSpeed = radius * 0.2f;
 
 		m_Splats = std::make_unique<GaussianSplatRenderer>();
 		m_Splats->Upload(data);
+		// Sort once up-front so the very first rendered frame is already
+		// back-to-front — otherwise the user catches a one-frame flash of
+		// file-order blending before the in-Render sort fires.
+		m_Splats->SortNow(m_Camera.GetRenderCamera()->GetViewMatrix());
 	}
 
 
@@ -119,14 +145,33 @@ namespace Sandbox {
 	void GaussianSplatScene::OnImGuiRender()
 	{
 		ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_FirstUseEver);
-		ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowSize(ImVec2(320.0f, 0.0f), ImGuiCond_FirstUseEver);
 
 		ImGui::Begin("Gaussian Splat");
 		ImGui::Text("Splats: %zu", m_SplatCount);
-		ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
-		ImGui::Separator();
+		ImGui::Text("FPS: %.1f (%.2f ms)",
+		            ImGui::GetIO().Framerate,
+		            1000.0f / std::max(ImGui::GetIO().Framerate, 1.0f));
+
 		const glm::vec3 eye = m_Camera.GetPosition();
-		ImGui::Text("Eye: (%.1f, %.1f, %.1f)", eye.x, eye.y, eye.z);
+		// Forward direction = camera-local -Z mapped to world. The camera's
+		// world transform has -Z as its third column negated; forward is
+		// therefore -transform[2].xyz.
+		const glm::mat4& cam = m_Camera.GetTransform();
+		const glm::vec3 fwd = -glm::vec3(cam[2]);
+		ImGui::Text("Eye: (%.2f, %.2f, %.2f)", eye.x, eye.y, eye.z);
+		ImGui::Text("Fwd: (%.2f, %.2f, %.2f)", fwd.x, fwd.y, fwd.z);
+
+		if (m_Splats) {
+			const auto last = m_Splats->LastFrame();
+			const auto peak = m_Splats->MaxLast5s();
+			ImGui::Separator();
+			ImGui::TextUnformatted("Per-stage (ms)  this / peak 5s");
+			ImGui::Text("  sort       %6.2f / %6.2f", last.sortMs,      peak.sortMs);
+			ImGui::Text("  reshuffle  %6.2f / %6.2f", last.reshuffleMs, peak.reshuffleMs);
+			ImGui::Text("  upload     %6.2f / %6.2f", last.uploadMs,    peak.uploadMs);
+			ImGui::Text("  draw       %6.2f / %6.2f", last.drawMs,      peak.drawMs);
+		}
 		ImGui::End();
 	}
 

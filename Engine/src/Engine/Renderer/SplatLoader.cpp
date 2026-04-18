@@ -71,17 +71,30 @@ namespace Engine {
 		// we re-normalize to defend against accumulated error.
 		constexpr float kQuatScale = 1.0f / 128.0f;
 
+		// Gaussian-splat captures use the COLMAP / OpenCV camera frame where
+		// +Y is down in the world. We bake a 180°-rotation-around-X transform
+		// into the loaded data so the rest of the engine can treat the splats
+		// as a normal +Y-up scene:
+		//   position  (x, y, z)      →  (x, -y, -z)
+		//   rotation  (w, x, y, z)   →  (w, x, -y, -z)   [quaternion conjugation by qX180]
+		// Applying the transform once here is cheaper than re-deriving it
+		// in every sort / camera-setup call downstream.
+
 		for (size_t i = 0; i < count; ++i) {
 			const PackedSplat& p = raw[i];
 
-			out.positions[i] = glm::vec3(p.pos[0], p.pos[1], p.pos[2]);
+			out.positions[i] = glm::vec3(p.pos[0], -p.pos[1], -p.pos[2]);
 			out.scales[i]    = glm::vec3(p.scale[0], p.scale[1], p.scale[2]);
 
+			// vec4 layout here is (w, x, y, z).
 			glm::vec4 q(
 				(static_cast<float>(p.rotation[0]) - 128.0f) * kQuatScale,  // w
 				(static_cast<float>(p.rotation[1]) - 128.0f) * kQuatScale,  // x
 				(static_cast<float>(p.rotation[2]) - 128.0f) * kQuatScale,  // y
 				(static_cast<float>(p.rotation[3]) - 128.0f) * kQuatScale); // z
+			// Apply the same X-axis 180° rotation to the splat's orientation.
+			q.z = -q.z;  // negate y component
+			q.w = -q.w;  // negate z component
 			const float len = glm::length(q);
 			out.rotations[i] = (len > 0.0f) ? q / len : glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
 
