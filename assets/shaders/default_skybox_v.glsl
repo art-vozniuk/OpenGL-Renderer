@@ -1,5 +1,3 @@
-#version 330 core
-			
 layout(location = 0) in vec3 a_Position;
 
 uniform mat4 u_ViewProjection;
@@ -10,9 +8,10 @@ out vec3 v_TexCoord;
 
 void main()
 {
-	vec4 pos = u_projection * mat4(mat3(u_view)) * vec4(a_Position, 1.f);
+	vec4 pos = u_projection * mat4(mat3(u_view)) * vec4(a_Position, 1.0);
+	// Force-depth-to-far-plane trick so skybox is always drawn behind everything.
 	pos = pos.xyww;
-	pos.z -= 0.000001f;
+	pos.z -= 0.000001;
 	gl_Position = pos;
 
 	v_TexCoord = a_Position;

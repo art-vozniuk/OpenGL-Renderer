@@ -42,7 +42,9 @@ namespace Engine {
 		static Application* s_Instance;
 	};
 
-	// To be defined in CLIENT
-	Application* CreateApplication();
+	// To be defined in CLIENT. Argv is forwarded from main() so the client
+	// can parse its own command-line flags without threading argc/argv
+	// through the engine core.
+	Application* CreateApplication(int argc, char** argv);
 
 }

@@ -37,30 +37,18 @@ namespace Engine {
 			return it->second;
 		}
 
+		// Shader sources are platform-agnostic .glsl files. The
+		// ShaderPreprocessor injects the correct #version / precision
+		// header per platform and resolves #include "..." directives
+		// relative to the shaders/ folder.
 		static const fs::path shadersPath = GetAssetsDir() / "shaders";
-		std::string ext = GetShaderExt();
 		SPtr<Shader> shader;
 		shader.reset(Shader::Create(
-			(shadersPath / (name + "_v" + ext)).string(),
-			(shadersPath / (name + "_f" + ext)).string()));
+			(shadersPath / (name + "_v.glsl")).string(),
+			(shadersPath / (name + "_f.glsl")).string(),
+			shadersPath.string()));
 		m_Data.emplace(name, shader);
 		return shader;
-	}
-
-
-	std::string ShaderCreator::GetShaderExt(void)
-	{
-		switch (Renderer::GetAPI())
-		{
-		case RendererAPI::API::None:    CORE_ASSERT(false, "RendererAPI::None is currently not supported!"); return "";
-#ifndef __EMSCRIPTEN__
-		case RendererAPI::API::OpenGL:  return ".glsl";
-#else
-		case RendererAPI::API::OpenGL:  return "_es.glsl";
-#endif
-		}
-		CORE_ASSERT(false, "Unknown RendererAPI!");
-		return "";
 	}
 
 

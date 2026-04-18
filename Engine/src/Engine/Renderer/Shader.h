@@ -28,7 +28,14 @@ namespace Engine {
 		virtual void UploadUniformsDefaultLighting(const SceneLight& scnLight, const glm::vec3& cameraPos);
 
 
-		static Shader* Create(const std::string& vertexPath, const std::string& fragmentPath);
+		// vertexPath / fragmentPath point to platform-agnostic .glsl files
+		// (without #version / precision). includeBaseDir is the directory
+		// that #include "..." directives are resolved against — typically
+		// the shaders/ folder. The raw sources are then expanded via
+		// ShaderPreprocessor before being passed to the GL compiler.
+		static Shader* Create(const std::string& vertexPath,
+		                      const std::string& fragmentPath,
+		                      const std::string& includeBaseDir);
 
 	private:
 		virtual void UploadUniformLight(const std::string& name, const Light& light);

@@ -1,4 +1,3 @@
-#version 330 core
 out vec4 color;
 
 in vec3 v_TexCoord;
@@ -6,6 +5,6 @@ in vec3 v_TexCoord;
 uniform samplerCube u_cube;
 
 void main()
-{   
-    color = texture(u_cube, v_TexCoord);
+{
+	color = texture(u_cube, v_TexCoord);
 }

@@ -5,6 +5,7 @@
 #include "Platform/OpenGL/OpenGLShader.h"
 #include "FileReader.h"
 #include "Scene.h"
+#include "ShaderPreprocessor.h"
 
 namespace Engine {
 
@@ -53,17 +54,23 @@ namespace Engine {
 	}
 
 
-	Shader* Shader::Create(const std::string& vertexPath, const std::string& fragmentPath)
+	Shader* Shader::Create(const std::string& vertexPath,
+	                       const std::string& fragmentPath,
+	                       const std::string& includeBaseDir)
 	{
-		std::string vsrc, fsrc;
+		std::string vsrcRaw, fsrcRaw;
 		FileReader vfile(vertexPath), ffile(fragmentPath);
-		if (!vfile.Parse(vsrc)) {
+		if (!vfile.Parse(vsrcRaw)) {
 			ASSERT_FAIL("Shader read failed");
 		}
-		if (!ffile.Parse(fsrc)) {
+		if (!ffile.Parse(fsrcRaw)) {
 			ASSERT_FAIL("Shader read failed");
 		}
 
+		ShaderPreprocessor::Options opts;
+		opts.IncludeBaseDir = includeBaseDir;
+		const std::string vsrc = ShaderPreprocessor::Process(vsrcRaw, ShaderPreprocessor::Stage::Vertex, opts);
+		const std::string fsrc = ShaderPreprocessor::Process(fsrcRaw, ShaderPreprocessor::Stage::Fragment, opts);
 
 		switch (Renderer::GetAPI())
 		{

@@ -219,5 +219,18 @@ if(OPENGL_RENDERER_BUILD_SANDBOX)
             --use-port=contrib.glfw3
             -O2
         )
+
+        # Post-build patch that hides Emscripten's default UI, re-routes .data
+        # loads through /renderer/data/, and forwards load progress to the
+        # parent frame via postMessage. Lives in-repo so any build path
+        # (local cmake, CI workflow, helper scripts) produces identical HTML.
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        add_custom_command(TARGET Sandbox POST_BUILD
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch_sandbox_html.py
+                    $<TARGET_FILE_DIR:Sandbox>/Sandbox.html
+            COMMENT "Patching Sandbox.html (hide UI + postMessage hooks)"
+            VERBATIM
+        )
     endif()
 endif()

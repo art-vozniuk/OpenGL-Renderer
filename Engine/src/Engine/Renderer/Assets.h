@@ -25,9 +25,6 @@ namespace Engine {
 	{
 	public:
 		virtual SPtr<Shader> Get(const std::string& name) override;
-
-	private:
-		std::string GetShaderExt(void);
 	};
 
 

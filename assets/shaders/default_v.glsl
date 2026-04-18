@@ -1,5 +1,3 @@
-#version 330 core
-			
 layout(location = 0) in vec3 a_Position;
 layout(location = 1) in vec3 a_Normal;
 layout(location = 2) in vec3 a_Tangent;
@@ -17,13 +15,13 @@ out mat3 v_TBN;
 void main()
 {
 	v_TexCoord	= a_UV;
-	v_FragPos	= vec3(u_Transform * vec4(a_Position, 1.0f));
+	v_FragPos	= vec3(u_Transform * vec4(a_Position, 1.0));
 	v_Normal	= inverse(transpose(mat3(u_Transform))) * a_Normal;
-	
-	vec3 T = normalize(vec3(u_Transform * vec4(a_Tangent,   0.f)));
-	vec3 B = normalize(vec3(u_Transform * vec4(a_Bitangent, 0.f)));
-	vec3 N = normalize(vec3(u_Transform * vec4(a_Normal,    0.f)));
+
+	vec3 T = normalize(vec3(u_Transform * vec4(a_Tangent,   0.0)));
+	vec3 B = normalize(vec3(u_Transform * vec4(a_Bitangent, 0.0)));
+	vec3 N = normalize(vec3(u_Transform * vec4(a_Normal,    0.0)));
 	v_TBN = mat3(T, B, N);
 
-	gl_Position = u_ViewProjection * vec4(v_FragPos, 1.0);	
+	gl_Position = u_ViewProjection * vec4(v_FragPos, 1.0);
 }
