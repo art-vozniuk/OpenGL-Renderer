@@ -20,24 +20,28 @@ out vec4 v_Color;
 // is the Mahalanobis distance squared for the fragment shader.
 out vec2 v_LocalPos;
 
+// Helper to push a vertex off-screen (clipped). Used both for behind-the-
+// camera splats and for outliers whose projected ellipse would be absurdly
+// large (a handful of badly-trained splats otherwise drown the viewport
+// in a single bright streak).
+void cull()
+{
+	gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+	v_Color = vec4(0.0);
+	v_LocalPos = vec2(0.0);
+}
+
 void main()
 {
 	// World → view space centre of the splat.
 	vec4 viewPosH = u_View * vec4(a_Pos, 1.0);
 	vec3 viewPos  = viewPosH.xyz;
 
-	// Cheap near-plane cull — mark the vertex "off-screen" if the splat is
-	// behind the camera. Doing this in the vertex shader keeps the pipeline
-	// simple and avoids per-fragment work for rejected splats.
-	if (viewPos.z >= 0.0) {
-		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);  // clipped
-		v_Color = vec4(0.0);
-		v_LocalPos = vec2(0.0);
-		return;
-	}
+	// Cheap near-plane cull — splats at / behind the camera project with an
+	// ill-conditioned Jacobian.
+	if (viewPos.z >= -0.05) { cull(); return; }
 
-	// Focal lengths in pixels from the projection matrix. Projection is
-	// 0.5 * viewportSize * P[0][0] (= fx) and 0.5 * viewportSize.y * P[1][1].
+	// Focal lengths in pixels from the projection matrix.
 	float fx = 0.5 * u_ViewportSize.x * u_Projection[0][0];
 	float fy = 0.5 * u_ViewportSize.y * u_Projection[1][1];
 
@@ -47,10 +51,14 @@ void main()
 	vec3 cov2   = Cov2D(viewPos, cov3D, viewRot, fx, fy);
 
 	SplatEigen eig = EvalEigen(cov2);
-	// 3σ cutoff — pixels past this are essentially zero after the
-	// Gaussian in the fragment shader.
 	float majorRadius = 3.0 * sqrt(eig.lambda1);
 	float minorRadius = 3.0 * sqrt(eig.lambda2);
+
+	// Drop splats whose projected extent is larger than the viewport — these
+	// are the outliers that paint bright streaks across the whole frame. A
+	// reasonable 3σ ellipse is at most a few hundred pixels across; anything
+	// in four-digit range is a sign of a pathological splat + Jacobian blow-up.
+	if (majorRadius > 0.5 * u_ViewportSize.y) { cull(); return; }
 
 	// Orient the billboard along the ellipse axes (in pixel units).
 	vec2 majorAxis = eig.majorAxis;

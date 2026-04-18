@@ -190,22 +190,14 @@ namespace Engine {
 			m_Depths[i] = a * p.x + b * p.y + c * p.z + d;
 		}
 
-		// 2. Sort indices so that the LATER-drawn splats are the FURTHEST
-		//    from the camera. GL view-space forward is -Z so "further" means
-		//    "more negative depth"; we therefore sort descending by depth
-		//    (the biggest — closest to zero — value comes first in the
-		//    instance iteration, and the most negative — furthest away —
-		//    comes last).
-		//
-		//    Why this direction: with glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
-		//    and the reference WebGL gsplat viewers, the visually correct
-		//    result on train.splat is achieved when instance[N-1] is the
-		//    furthest splat. Switching to ascending produces a washed-out
-		//    "grey fog" dominated by outlier splats drawn on top. See
-		//    antimatter15/splat for the same convention.
+		// 2. Sort back-to-front: furthest splats first in instance order, so
+		//    they are drawn first and covered by closer ones (correct Porter-
+		//    Duff "over" with our premultiplied-alpha blend). GL view-space
+		//    forward is -Z, so "further" = more negative depth. Ascending
+		//    sort by depth puts the most-negative (furthest) first.
 		std::iota(m_SortIndices.begin(), m_SortIndices.end(), uint32_t{0});
 		std::sort(m_SortIndices.begin(), m_SortIndices.end(),
-		          [this](uint32_t i, uint32_t j) { return m_Depths[i] > m_Depths[j]; });
+		          [this](uint32_t i, uint32_t j) { return m_Depths[i] < m_Depths[j]; });
 
 		// 3. Reshuffle each per-instance VBO's data via the permutation and
 		//    re-upload. Using scratch buffers the same size as the source
