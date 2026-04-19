@@ -1,5 +1,5 @@
 // Gaussian-splat vertex shader with view-dependent SH colour (bands 1..3).
-// A near-copy of gsplat_v.glsl — same quad sizing + EWA projection maths —
+// A near-copy of gsplat_v.glsl -- same quad sizing + EWA projection maths --
 // but reads an RGB texture of SH coefs per splat and adds the evaluated
 // view-dependent term to the DC colour uploaded through a_Color.
 
@@ -13,7 +13,7 @@ layout(location = 3) in vec4 a_Rot;
 layout(location = 4) in vec4 a_Color;
 // Original splat index (pre-sort). The renderer's back-to-front sort
 // reshuffles the other per-instance attributes each time the camera stops
-// moving, but the SH texture stays in file order — so we carry a reshuffled
+// moving, but the SH texture stays in file order -- so we carry a reshuffled
 // index per instance to look up the correct row in the SH texture.
 layout(location = 5) in uint a_OrigIdx;
 
@@ -71,7 +71,7 @@ void main()
 	v_LocalPos = a_Corner * 3.0;
 
 	// View direction from camera to splat, in the PLY's native Y-down frame.
-	// Loader flipped (y, z) → to feed SH basis we must flip back.
+	// Loader flipped (y, z) -> to feed SH basis we must flip back.
 	vec3 dirYup   = normalize(a_Pos - u_CameraPos);
 	vec3 dirPly   = vec3(dirYup.x, -dirYup.y, -dirYup.z);
 

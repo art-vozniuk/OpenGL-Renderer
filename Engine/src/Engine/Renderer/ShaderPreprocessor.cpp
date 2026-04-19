@@ -171,7 +171,19 @@ namespace Engine {
 		               /*currentFileId=*/0,
 		               out);
 
-		return out.str();
+		// Defensive: GLSL ES compilers in the wild (notably the WebKit
+		// shader translator shipped with some Android browsers) have broken
+		// UTF-8 handling. A Greek letter or em-dash in a *comment* can
+		// terminate comment parsing mid-sequence and make the next tokens
+		// look like garbage identifiers. Author-side we keep shaders
+		// ASCII-only, but this pass is a belt-and-braces strip so one slip
+		// doesn't silently break mobile. Replaces every non-ASCII byte with
+		// a space so line/column positions in compiler errors are preserved.
+		std::string s = out.str();
+		for (char& c : s) {
+			if (static_cast<unsigned char>(c) >= 0x80) c = ' ';
+		}
+		return s;
 	}
 
 }

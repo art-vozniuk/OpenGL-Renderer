@@ -1,5 +1,5 @@
 // Shared Gaussian-Splat maths used by gsplat_v and gsplat_f.
-// Math conventions follow Kerbl et al. 2023 §4 + antimatter15/splat reference.
+// Math conventions follow Kerbl et al. 2023 section4 + antimatter15/splat reference.
 
 // Expand a unit quaternion (w, x, y, z) into a 3x3 rotation matrix.
 mat3 QuatToMat3(vec4 q)
@@ -21,7 +21,7 @@ mat3 QuatToMat3(vec4 q)
 }
 
 // Build the 3D covariance matrix for an anisotropic Gaussian:
-//   Σ = R · diag(s)² · Rᵀ
+//   Sigma = R * diag(s)^2 * R^T
 // We store the unit rotation quaternion and per-axis sigma on the CPU.
 mat3 Cov3D(vec3 scale, vec4 rotation)
 {
@@ -36,10 +36,10 @@ mat3 Cov3D(vec3 scale, vec4 rotation)
 
 // Project a 3D covariance onto the image plane given the camera view matrix
 // and focal lengths (fx, fy in pixels). Returns the 2x2 screen-space
-// covariance encoded as vec3 (Σxx, Σxy, Σyy).
+// covariance encoded as vec3 (Sigmaxx, Sigmaxy, Sigmayy).
 //
-// Uses the EWA-style first-order Jacobian from §4 of the reference paper:
-//   J · W · Σ · Wᵀ · Jᵀ
+// Uses the EWA-style first-order Jacobian from section4 of the reference paper:
+//   J * W * Sigma * W^T * J^T
 // where W is the view-space rotation (upper-left 3x3 of view matrix)
 // and J is the Jacobian of the perspective projection at view-space z.
 // A small low-pass term is added on the diagonal to keep single-pixel
@@ -64,9 +64,9 @@ vec3 Cov2D(vec3 viewPos, mat3 cov3D, mat3 viewRot, float fx, float fy)
 	return vec3(cov[0][0] + 0.3, cov[0][1], cov[1][1] + 0.3);
 }
 
-// Given a 2D covariance (Σxx, Σxy, Σyy) return the two eigenvalues and
+// Given a 2D covariance (Sigmaxx, Sigmaxy, Sigmayy) return the two eigenvalues and
 // eigenvector of the major axis. Used to size the billboard quad on the
-// screen so it bounds the ~3σ ellipse of the Gaussian.
+// screen so it bounds the ~3sigma ellipse of the Gaussian.
 struct SplatEigen {
 	float lambda1;  // larger eigenvalue (major axis variance)
 	float lambda2;  // smaller eigenvalue (minor axis variance)
@@ -84,7 +84,7 @@ SplatEigen EvalEigen(vec3 cov)
 	float lambda1 = mid + disc;
 	float lambda2 = max(mid - disc, 0.1);
 
-	// Eigenvector for lambda1. Guard the b ≈ 0 case where Σ is diagonal.
+	// Eigenvector for lambda1. Guard the b ~= 0 case where Sigma is diagonal.
 	vec2 axis;
 	if (abs(b) < 1e-6) {
 		axis = (a >= c) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);

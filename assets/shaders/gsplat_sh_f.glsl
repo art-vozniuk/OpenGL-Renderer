@@ -1,4 +1,4 @@
-// Gaussian-splat fragment shader, SH variant. Identical to gsplat_f.glsl —
+// Gaussian-splat fragment shader, SH variant. Identical to gsplat_f.glsl --
 // colour assembly happens entirely in the vertex shader (SH evaluation is
 // per-splat, not per-pixel), so the fragment path only needs the Mahalanobis
 // weight and premultiplied-alpha output.

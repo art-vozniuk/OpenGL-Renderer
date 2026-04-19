@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "SplatLoader.h"
 
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
@@ -44,19 +45,37 @@ namespace Engine {
 			return {};
 		}
 
-		std::ifstream in(path, std::ios::binary);
-		if (!in) {
+		// Use C stdio with explicit "rb" — on emscripten's MEMFS (preloaded
+		// from the .data bundle), std::ifstream with std::ios::binary has
+		// been observed to hand back corrupted bytes on some Android WebKit
+		// browsers (bbox came back ~10^30 instead of the real ~±30 range).
+		// fopen/fread go through the same FS layer but with a simpler path
+		// that has been reliable in the field.
+		std::FILE* f = std::fopen(path.c_str(), "rb");
+		if (!f) {
 			ERROR_CORE("SplatLoader: cannot open '{0}'", path);
 			return {};
 		}
 
 		const size_t count = static_cast<size_t>(size) / sizeof(PackedSplat);
 		std::vector<PackedSplat> raw(count);
-		in.read(reinterpret_cast<char*>(raw.data()),
-		        static_cast<std::streamsize>(size));
-		if (!in) {
-			ERROR_CORE("SplatLoader: short read on '{0}'", path);
+		const size_t got = std::fread(raw.data(), sizeof(PackedSplat), count, f);
+		std::fclose(f);
+		if (got != count) {
+			ERROR_CORE("SplatLoader: short read on '{0}' ({1}/{2} records)",
+			           path, (uint64_t)got, (uint64_t)count);
 			return {};
+		}
+
+		// Sanity log: first record's position bytes. When the deployed web
+		// bundle silently corrupts the .data file, this line surfaces
+		// the issue in the browser console ("pos0 = 1e+30, ..." vs the
+		// expected small world-space float) before any rendering happens.
+		{
+			const PackedSplat& s0 = raw.front();
+			INFO_CORE("SplatLoader: splat0.pos=({0},{1},{2}) scale=({3},{4},{5})",
+			          s0.pos[0], s0.pos[1], s0.pos[2],
+			          s0.scale[0], s0.scale[1], s0.scale[2]);
 		}
 
 		SplatData out;

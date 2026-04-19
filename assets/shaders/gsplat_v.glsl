@@ -1,10 +1,10 @@
 #include "common/gsplat.glsl"
 
 // The quad corner: 4 vertices with coords in [-1, +1] driven by
-// gl_VertexID → the CPU only uploads 4 entries for one TRIANGLE_STRIP.
+// gl_VertexID -> the CPU only uploads 4 entries for one TRIANGLE_STRIP.
 layout(location = 0) in vec2 a_Corner;
 
-// Per-instance splat attributes (SoA → one buffer per column).
+// Per-instance splat attributes (SoA -> one buffer per column).
 layout(location = 1) in vec3 a_Pos;
 layout(location = 2) in vec3 a_Scale;
 layout(location = 3) in vec4 a_Rot;    // quaternion (w, x, y, z)
@@ -12,11 +12,11 @@ layout(location = 4) in vec4 a_Color;  // rgba in 0..1 (CPU divides 255)
 
 uniform mat4 u_View;
 uniform mat4 u_Projection;
-uniform vec2 u_ViewportSize;  // pixels — for focal-length reconstruction
+uniform vec2 u_ViewportSize;  // pixels -- for focal-length reconstruction
 
 out vec4 v_Color;
 // Vertex-local 2D offset from the splat's screen-space centre, measured
-// in units of the *inverse* 2D covariance — so  r² = dot(v_LocalPos, v_LocalPos)
+// in units of the *inverse* 2D covariance -- so  r^2 = dot(v_LocalPos, v_LocalPos)
 // is the Mahalanobis distance squared for the fragment shader.
 out vec2 v_LocalPos;
 
@@ -33,11 +33,11 @@ void cull()
 
 void main()
 {
-	// World → view space centre of the splat.
+	// World -> view space centre of the splat.
 	vec4 viewPosH = u_View * vec4(a_Pos, 1.0);
 	vec3 viewPos  = viewPosH.xyz;
 
-	// Cheap near-plane cull — splats at / behind the camera project with an
+	// Cheap near-plane cull -- splats at / behind the camera project with an
 	// ill-conditioned Jacobian.
 	if (viewPos.z >= -0.05) { cull(); return; }
 
@@ -54,9 +54,9 @@ void main()
 	float majorRadius = 3.0 * sqrt(eig.lambda1);
 	float minorRadius = 3.0 * sqrt(eig.lambda2);
 
-	// Drop splats whose projected extent is larger than the viewport — these
+	// Drop splats whose projected extent is larger than the viewport -- these
 	// are the outliers that paint bright streaks across the whole frame. A
-	// reasonable 3σ ellipse is at most a few hundred pixels across; anything
+	// reasonable 3sigma ellipse is at most a few hundred pixels across; anything
 	// in four-digit range is a sign of a pathological splat + Jacobian blow-up.
 	if (majorRadius > 0.5 * u_ViewportSize.y) { cull(); return; }
 

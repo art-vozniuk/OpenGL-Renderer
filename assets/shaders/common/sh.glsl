@@ -15,7 +15,7 @@
 // A single splat occupies `coefCount` contiguous texels. `texelFetch`
 // is driven by an integer coef index and the splat's gl_InstanceID.
 
-// Constants precomputed from sqrt((2l+1) / (4π)) * associated-Legendre prefactors.
+// Constants precomputed from sqrt((2l+1) / (4pi)) * associated-Legendre prefactors.
 // Values match the reference 3DGS CUDA rasterizer.
 const float SH_C0   = 0.28209479177387814;
 const float SH_C1_  = 0.4886025119029199;
@@ -44,16 +44,16 @@ vec3 FetchShCoef(sampler2D shTex, int splatId, int coefIdx,
 
 // Evaluate the full SH expansion (DC + bands 1..3) for one splat. `coefCount`
 // is the total number of coef texels per splat: 1 (DC only) up to 16 (deg 3).
-// `dir` is a unit direction from camera → splat in the PLY's native frame.
+// `dir` is a unit direction from camera -> splat in the PLY's native frame.
 //
 // Matches the reference 3DGS CUDA rasterizer's `computeColorFromSH` bit-for-
-// bit: the caller must add 0.5 and clamp to [0, ∞) before using the result
+// bit: the caller must add 0.5 and clamp to [0, inf) before using the result
 // as a linear colour.
 vec3 EvalShFull(vec3 dir, sampler2D shTex, int splatId,
                 int coefCount, int splatsPerRow)
 {
 	// Slot 0: DC. We apply SH_C0 here so the caller doesn't have to know
-	// about band-0 vs bands-1..3 — it's one sum.
+	// about band-0 vs bands-1..3 -- it's one sum.
 	vec3 c = SH_C0 * FetchShCoef(shTex, splatId, 0, coefCount, splatsPerRow);
 	if (coefCount < 2) return c;
 
@@ -88,7 +88,7 @@ vec3 EvalShFull(vec3 dir, sampler2D shTex, int splatId,
 }
 
 
-// Legacy: evaluate only bands 1..3 (no DC) — kept in case anything wants to
+// Legacy: evaluate only bands 1..3 (no DC) -- kept in case anything wants to
 // mix a VBO-stored DC with texture-stored rest. `coefCount` is the number
 // of rest coefs (up to 15).
 vec3 EvalShRest(vec3 dir, sampler2D shTex, int splatId,
