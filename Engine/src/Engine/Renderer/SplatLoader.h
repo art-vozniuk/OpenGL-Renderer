@@ -26,8 +26,21 @@ namespace Engine {
 		std::vector<glm::vec4> rotations;  // quaternion (w, x, y, z), unit-length
 		std::vector<glm::u8vec4> colors;   // premultiplied RGBA in 0..255
 
+		// Optional view-dependent spherical-harmonic coefficients (bands 1..3,
+		// 15 coefs × 3 channels = 45 floats per splat). Empty when the source
+		// file had none (antimatter15 .splat) — in that case the renderer falls
+		// back to the flat-color path. Stored in RGB-interleaved per-coef
+		// order:  coef0.r, coef0.g, coef0.b, coef1.r, ..., coef14.b.
+		// Band 0 (DC) is already folded into `colors` via the SH0 basis.
+		std::vector<float> shRest;
+
+		// Number of SH coefs per channel in `shRest` (15 for degree 3, 0 when
+		// the dataset has no view-dependent term).
+		int shCoefCount = 0;
+
 		size_t Count() const { return positions.size(); }
 		bool   Empty() const { return positions.empty(); }
+		bool   HasSH() const { return shCoefCount > 0 && !shRest.empty(); }
 	};
 
 

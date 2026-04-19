@@ -16,3 +16,6 @@ Sandbox/assets/shaders/simple_texture_v.glsl
 Sandbox/assets/shaders/simple_v.glsl
 Sandbox/imgui.ini
 *.stackdump
+
+# Large Gaussian-splat PLY test scenes — downloaded locally, too big for git.
+assets/splat/*.ply

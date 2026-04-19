@@ -47,6 +47,13 @@ namespace Engine {
 
 		size_t SplatCount() const { return m_Count; }
 
+		// Runtime toggle: when true the SH shader path is bypassed and the
+		// flat-colour (DC-only, uint8) shader runs even if SH data is loaded.
+		// Lets the UI compare "with SH" vs "without SH" on the same dataset.
+		void SetSHDisabled(bool disabled) { m_ShDisabled = disabled; }
+		bool IsSHDisabled() const { return m_ShDisabled; }
+		bool HasSH() const { return m_ShTex != 0; }
+
 		// Runs an immediate back-to-front sort outside the render loop.
 		// Call once after Upload() + initial camera setup so the first
 		// visible frame is already sorted (otherwise the first frame
@@ -90,10 +97,34 @@ namespace Engine {
 		uint32_t m_QuadVbo = 0;
 		uint32_t m_QuadEbo = 0;
 
-		uint32_t m_PosVbo   = 0;
-		uint32_t m_ScaleVbo = 0;
-		uint32_t m_RotVbo   = 0;
-		uint32_t m_ColorVbo = 0;
+		uint32_t m_PosVbo     = 0;
+		uint32_t m_ScaleVbo   = 0;
+		uint32_t m_RotVbo     = 0;
+		uint32_t m_ColorVbo   = 0;
+		// Original splat index per draw-instance. Needed because the sorter
+		// reshuffles the other per-instance VBOs (pos/scale/rot/color) but
+		// the SH texture stays in file order; without this, the shader's
+		// `gl_InstanceID` lookup into the SH texture points to a different
+		// splat's view-dependent data after every sort. Only populated when
+		// SH is on.
+		uint32_t m_OrigIdxVbo = 0;
+
+		// Optional SH texture for view-dependent colour. Only populated when
+		// the source file carried SH bands 1..3 (Inria .ply); antimatter15
+		// .splat datasets leave this at zero and the renderer uses the
+		// flat-colour shader variant.
+		//
+		// Layout: GL_RGBA32F, tiled so width × height fit within
+		// GL_MAX_TEXTURE_SIZE on both axes. Each splat occupies m_ShCoefCount
+		// contiguous texels starting at column (splatId % m_ShSplatsPerRow)
+		// * m_ShCoefCount on row (splatId / m_ShSplatsPerRow). Alpha channel
+		// is padding (RGB32F is not a guaranteed-required GL sampler format
+		// on every driver; RGBA32F is — Apple's GL 4.1 stack refuses to bind
+		// RGB32F to a float sampler).
+		uint32_t m_ShTex           = 0;
+		int      m_ShCoefCount     = 0;
+		int      m_ShSplatsPerRow  = 0;
+		bool     m_ShDisabled      = false;  // UI toggle, not asset property
 
 		// CPU-side copies of the original per-splat data, kept so the sorter
 		// can reorder rows without round-tripping through the GPU. These are
@@ -106,6 +137,7 @@ namespace Engine {
 		// Scratch storage for the permutation + per-sort reshuffle. Kept as
 		// members so we don't pay for alloc/free every sort.
 		std::vector<uint32_t>    m_SortIndices;
+		std::vector<uint32_t>    m_ScratchU32;  // used to reshuffle orig-index
 		std::vector<uint32_t>    m_SortIndicesScratch;  // radix-sort ping-pong buffer
 		std::vector<uint32_t>    m_SortKeys;            // depths cast to sortable uint32
 		std::vector<uint32_t>    m_SortKeysScratch;
