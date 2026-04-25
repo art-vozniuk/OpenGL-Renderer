@@ -4,7 +4,7 @@ project(Renderer LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -90,9 +90,25 @@ add_library(vendor_glm INTERFACE)
 target_include_directories(vendor_glm SYSTEM INTERFACE
     "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/glm")
 
-add_library(vendor_spdlog INTERFACE)
-target_include_directories(vendor_spdlog SYSTEM INTERFACE
-    "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/spdlog/include")
+# Logging stack: spdlog backed by std::format (no bundled fmt).
+#
+# Both the bundled fmt (in spdlog 1.x) and external fmt 10.x/11.x trip
+# a `consteval` compile-time format-string check that emscripten clang
+# refuses under C++23's stricter constant-eval rules. C++20+ libc++
+# already ships `std::format`, so we side-step fmt entirely by setting
+# SPDLOG_USE_STD_FORMAT — spdlog uses the standard library directly.
+set(SPDLOG_BUILD_PIC      ON  CACHE BOOL "" FORCE)
+set(SPDLOG_USE_STD_FORMAT ON  CACHE BOOL "" FORCE)
+set(SPDLOG_BUILD_EXAMPLE  OFF CACHE BOOL "" FORCE)
+set(SPDLOG_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(SPDLOG_INSTALL        OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog
+    GIT_TAG        v1.15.1
+    GIT_SHALLOW    ON
+)
+FetchContent_MakeAvailable(spdlog)
 
 
 # ============================================================
@@ -152,14 +168,14 @@ if(NOT EMSCRIPTEN)
             glfw
             glfw3webgpu
             vendor_glm
-            vendor_spdlog
+            spdlog::spdlog
     )
 else()
     target_link_libraries(Engine
         PUBLIC
             webgpu
             vendor_glm
-            vendor_spdlog
+            spdlog::spdlog
     )
 endif()
 

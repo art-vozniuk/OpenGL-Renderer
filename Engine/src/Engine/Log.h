@@ -2,7 +2,7 @@
 
 #include "Core.h"
 #include "spdlog/spdlog.h"
-#include "spdlog/fmt/ostr.h"
+// std::format used directly by spdlog (SPDLOG_USE_STD_FORMAT)
 
 namespace Engine {
 
