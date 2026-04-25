@@ -70,15 +70,22 @@ namespace Engine {
 		WGPUBuffer m_Color  = nullptr;   // u32 packed (u8x4 normalised)
 
 		// Sort scratch (storage, rewritten every frame).
-		WGPUBuffer m_Depths   = nullptr; // array<u32, N>
-		WGPUBuffer m_IdxPing  = nullptr; // array<u32, N>
-		WGPUBuffer m_IdxPong  = nullptr; // array<u32, N>
-		WGPUBuffer m_Hist     = nullptr; // array<atomic<u32>, 256>
-		WGPUBuffer m_Offsets  = nullptr; // array<atomic<u32>, 256>
+		WGPUBuffer m_Depths            = nullptr; // array<u32, N>
+		WGPUBuffer m_IdxPing           = nullptr; // array<u32, N>
+		WGPUBuffer m_IdxPong           = nullptr; // array<u32, N>
+		// Per-(workgroup, digit) histogram + same-shape prefix scan output.
+		// Layout for both: [digit * numWg + wg]. Sized at upload time.
+		WGPUBuffer m_WgHist            = nullptr;
+		WGPUBuffer m_WgOffset          = nullptr;
+		// Per-digit global bucket start (256 u32).
+		WGPUBuffer m_GlobalDigitOffset = nullptr;
+		// Per-digit total count, intermediate output of the column scan,
+		// input to the digit-offset scan. 256 u32.
+		WGPUBuffer m_DigitTotals       = nullptr;
 
 		// Uniforms.
 		WGPUBuffer m_RenderUniform = nullptr;  // mat4 view, mat4 proj, vec2 viewport, vec2 pad
-		WGPUBuffer m_SortUniform   = nullptr;  // vec4 row2, u32 N, u32 shift, u32 swap, u32 pad
+		WGPUBuffer m_SortUniform   = nullptr;  // vec4 row2, u32 N, u32 shift, u32 swap, u32 numWg
 
 		// Layouts + groups.
 		WGPUBindGroupLayout m_SortBGL    = nullptr;
@@ -90,11 +97,12 @@ namespace Engine {
 		WGPUPipelineLayout  m_RenderPL   = nullptr;
 
 		// Compute pipelines (one per WGSL entry point).
-		WGPUComputePipeline m_PipeInit       = nullptr;
-		WGPUComputePipeline m_PipeClearHist  = nullptr;
-		WGPUComputePipeline m_PipeHistogram  = nullptr;
-		WGPUComputePipeline m_PipePrefixSum  = nullptr;
-		WGPUComputePipeline m_PipeScatter    = nullptr;
+		WGPUComputePipeline m_PipeInit         = nullptr;
+		WGPUComputePipeline m_PipeClearWgHist  = nullptr;
+		WGPUComputePipeline m_PipeWgHist       = nullptr;
+		WGPUComputePipeline m_PipeColumnScan      = nullptr;
+		WGPUComputePipeline m_PipeDigitOffsetScan = nullptr;
+		WGPUComputePipeline m_PipeStableScatter = nullptr;
 
 		// Render pipeline.
 		WGPURenderPipeline  m_PipeRender     = nullptr;

@@ -29,6 +29,8 @@ namespace Sandbox {
 		std::unique_ptr<Engine::GaussianSplatRenderer> m_Splats;
 		size_t m_SplatCount = 0;
 		int    m_FrameCount = 0;
+		int    m_FpsCounter = 0;
+		double m_FpsT0      = 0.0;
 	};
 
 }

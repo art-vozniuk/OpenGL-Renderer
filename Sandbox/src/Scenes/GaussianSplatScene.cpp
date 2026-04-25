@@ -6,6 +6,7 @@
 #include "Engine/Renderer/Renderer.h"
 #include "Engine/Renderer/SplatLoader.h"
 
+#include <GLFW/glfw3.h>
 #include <cstdlib>
 #include <filesystem>
 #include <glm/gtc/matrix_transform.hpp>
@@ -87,9 +88,25 @@ namespace Sandbox {
 			                       glm::vec2(m_ScreenWidth, m_ScreenHeight));
 		}
 
+		// Roll a 60-frame FPS counter and print every 60 frames so we can
+		// see steady-state perf without the load-time outlier on frame 0.
+		++m_FpsCounter;
+		double now = glfwGetTime();
+		if (m_FpsT0 == 0.0) m_FpsT0 = now;
+		if (m_FpsCounter % 60 == 0) {
+			float dt = (float)(now - m_FpsT0);
+			INFO_CORE("gsplat: 60 frames in {0:.3f}s = {1:.1f} fps", dt, 60.0f / dt);
+			m_FpsT0 = now;
+		}
+
 		// Headless screenshot hook (single-shot capture + exit).
+		// GS_CAPTURE_FRAME (default 30) chooses which frame to grab —
+		// useful for capturing multiple frames in succession to diff
+		// inter-frame stability when chasing flicker.
 		++m_FrameCount;
-		if (m_FrameCount == 30) {
+		int captureAt = 30;
+		if (const char* f = std::getenv("GS_CAPTURE_FRAME")) captureAt = std::atoi(f);
+		if (m_FrameCount == captureAt) {
 			if (const char* p = std::getenv("GS_CAPTURE_PATH")) {
 				if (*p) Renderer::RequestScreenshot(p);
 			}
