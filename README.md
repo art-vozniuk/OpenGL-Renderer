@@ -1,32 +1,51 @@
-# 3D Renderer
-<img width="1460" height="839" alt="image" src="https://github.com/user-attachments/assets/e9491f87-3b90-42d1-9013-a9a49f0e4b50" />
+# Renderer
 
-Real-time 3D scene renderer built around a custom C++ engine.
+Real-time Gaussian Splatting renderer. Custom C++ engine on WebGPU.
+Runs natively on macOS (Dawn → Metal) and in the browser (Emscripten →
+emdawnwebgpu → browser WebGPU) from one source tree.
 
-## Platforms
+## Highlights
 
-- **macOS** — native OpenGL build with Xcode / AppleClang
-- **Web** — compiled to WebAssembly via Emscripten, runs in the browser using WebGL 2
+- **Per-frame GPU radix sort.** Five compute kernels, four byte-passes
+  of LSD radix, workgroup-local stable scatter via per-thread local
+  rank in shared memory. Sorts 1M+ splats every frame.
+- **EWA splat projection in WGSL.** Cov3D = R · S² · Rᵀ projected to
+  2D via the standard EWA Jacobian, 3-σ quad sized off the eigen-
+  values, alpha-over blend with premultiplied source.
+- **Storage-buffer indirection.** Splat data lives in storage buffers;
+  only the small `sortedIndices` buffer is rewritten between frames.
+- **Headless capture.** `GS_CAPTURE_FRAME=N GS_CAPTURE_PATH=out.png ./Sandbox`
+  encodes a CopyTextureToBuffer of the swap chain on frame N, writes
+  a PNG, exits — used for visual regression.
 
-## Features
+## Architecture
 
-- Phong lighting
-- Normal mapping
-- Cubemaps / skybox
-- Post-processing with framebuffer passes
-- Asset loading through tinygltf
-- ImGui runtime controls (native)
+```
+Engine/src/Engine/Renderer/
+    WGPUContext            instance / surface / adapter / device / queue
+    Renderer               BeginScene / OpenColorPass / EndScene
+    GaussianSplatRenderer  upload, GPU sort dispatches, indirected draw
+    SplatLoader            antimatter15 .splat parser
+    Camera, FlyCamera
+
+assets/shaders/
+    gsplat.wgsl            vertex + fragment for the splat draw
+    gsplat_sort.wgsl       compute kernels for the GPU radix sort
+
+assets/splat/
+    train.splat            Inria "Train" scene
+
+Sandbox/src/
+    SandboxApp.cpp         entry — picks a scene by id, pushes a layer
+    Scenes/                GaussianSplatScene + scene registry
+```
 
 ## Requirements
 
-- CMake 3.25+
-- A C++17 compiler
-
-**Native (macOS):**
-- Xcode / AppleClang
-
-**Web (Emscripten):**
-- [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html)
+- CMake 3.25+, C++17 compiler
+- macOS native: Xcode / AppleClang
+- Web: [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html)
+- WebGPU-capable browser (Chrome 113+, Safari 18+, Firefox 141+)
 
 ## Build
 
@@ -43,14 +62,14 @@ cmake --build build --target Sandbox -j 8
 ```bash
 source ~/emsdk/emsdk_env.sh
 emcmake cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release
-cmake --build build-web --parallel $(sysctl -n hw.ncpu)
+cmake --build build-web --target Sandbox -j 8
 ```
 
-Output: `build-web/Sandbox.html`, `.js`, `.wasm`, `.data`
+Output: `build-web/Sandbox.{html,js,wasm,data}`. Serve over HTTP and
+open `Sandbox.html?scene=gsplat`.
 
 ## Controls
 
-- Hold right mouse button and use `W`, `A`, `S`, `D` to move the camera
-- `Q` / `E` to move down / up
+- Hold left mouse button + `W`/`A`/`S`/`D` to fly the camera
+- `Q` / `E` to descend / ascend
 - Scroll to adjust speed
-- Use the ImGui `Settings` panel for renderer and scene controls (native only)
