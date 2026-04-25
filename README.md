@@ -4,6 +4,8 @@ Real-time Gaussian Splatting renderer. Custom C++ engine on WebGPU.
 Runs natively on macOS (Dawn → Metal) and in the browser (Emscripten →
 emdawnwebgpu → browser WebGPU) from one source tree.
 
+<img width="1508" height="856" alt="image" src="https://github.com/user-attachments/assets/3c252bae-d1f0-4446-8d2c-cad5f6463d97" />
+
 ## Highlights
 
 - **Per-frame GPU radix sort.** Five compute kernels, four byte-passes
