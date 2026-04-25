@@ -77,10 +77,15 @@ namespace Engine {
 		int  splatCount     = 0;
 		bool gpuTimingsValid = false;  // false → only CPU samples are meaningful
 
+		// Camera world-space position the renderer used for *this* frame.
+		// Streamed in the perf JSON so the recorder log can correlate
+		// stutters with where in the scene the user was looking.
+		float camEye[3] = {0.0f, 0.0f, 0.0f};
+
 		void Emit() const
 		{
 		#ifdef __EMSCRIPTEN__
-			char buf[640];
+			char buf[720];
 			std::snprintf(
 				buf, sizeof(buf),
 				"{\"type\":\"perf\","
@@ -89,12 +94,14 @@ namespace Engine {
 				"\"gpuSort\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f},"
 				"\"gpuRender\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f},"
 				"\"gpuTotal\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f},"
+				"\"camEye\":[%.2f,%.2f,%.2f],"
 				"\"splats\":%d,\"gpuValid\":%s}",
 				frameMs.Current(),     frameMs.Avg(),     frameMs.Max(),
 				cpuEncodeMs.Current(), cpuEncodeMs.Avg(), cpuEncodeMs.Max(),
 				gpuSortMs.Current(),   gpuSortMs.Avg(),   gpuSortMs.Max(),
 				gpuRenderMs.Current(), gpuRenderMs.Avg(), gpuRenderMs.Max(),
 				gpuTotalMs.Current(),  gpuTotalMs.Avg(),  gpuTotalMs.Max(),
+				camEye[0], camEye[1], camEye[2],
 				splatCount,
 				gpuTimingsValid ? "true" : "false");
 

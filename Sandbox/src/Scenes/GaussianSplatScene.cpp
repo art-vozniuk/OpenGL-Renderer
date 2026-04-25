@@ -257,10 +257,14 @@ namespace Sandbox {
 
 		const double encodeEnd = glfwGetTime();
 		if (m_Splats) {
-			m_Splats->Metrics().cpuEncodeMs.Push(
-				static_cast<float>((encodeEnd - encodeStart) * 1000.0));
-			m_Splats->Metrics().splatCount = static_cast<int>(m_SplatCount);
-			m_Splats->Metrics().Emit();
+			auto& m = m_Splats->Metrics();
+			m.cpuEncodeMs.Push(static_cast<float>((encodeEnd - encodeStart) * 1000.0));
+			m.splatCount = static_cast<int>(m_SplatCount);
+			const glm::vec3 eye = m_Camera.GetPosition();
+			m.camEye[0] = eye.x;
+			m.camEye[1] = eye.y;
+			m.camEye[2] = eye.z;
+			m.Emit();
 		}
 
 		// Roll a 60-frame FPS counter and print every 60 frames so we can
