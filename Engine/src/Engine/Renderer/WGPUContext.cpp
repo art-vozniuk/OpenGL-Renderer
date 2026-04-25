@@ -6,6 +6,8 @@
 #include <GLFW/glfw3.h>
 #ifndef __EMSCRIPTEN__
 #  include <glfw3webgpu.h>
+#else
+#  include <emscripten/emscripten.h>
 #endif
 
 namespace Engine {
@@ -92,6 +94,7 @@ namespace Engine {
 		m_Surface = wgpuInstanceCreateSurface(m_Instance, &sDesc);
 #endif
 		if (!m_Surface) { ERROR_CORE("wgpu surface create failed"); return false; }
+		INFO_CORE("WGPU surface ready, requesting adapter...");
 
 		// Adapter (async with poll-based wait)
 		AdapterRequest aReq;
@@ -99,13 +102,26 @@ namespace Engine {
 		aOpts.compatibleSurface = m_Surface;
 		aOpts.powerPreference   = WGPUPowerPreference_HighPerformance;
 		WGPURequestAdapterCallbackInfo aCb{};
-		aCb.mode      = WGPUCallbackMode_AllowProcessEvents;
+		// Spontaneous fires whenever — on emscripten that's "right after the
+		// JS callback resolves, on the next event-loop tick we yield to via
+		// emscripten_sleep". On native it fires from inside the next
+		// wgpuInstanceProcessEvents call.
+		aCb.mode      = WGPUCallbackMode_AllowSpontaneous;
 		aCb.callback  = OnAdapter;
 		aCb.userdata1 = &aReq;
 		(void)wgpuInstanceRequestAdapter(m_Instance, &aOpts, aCb);
-		while (!aReq.done) wgpuInstanceProcessEvents(m_Instance);
-		if (!aReq.handle) return false;
+		while (!aReq.done) {
+#ifdef __EMSCRIPTEN__
+			// Browser drives the event loop itself; ASYNCIFY makes this
+			// look synchronous in C++ while yielding to the JS scheduler.
+			emscripten_sleep(10);
+#else
+			wgpuInstanceProcessEvents(m_Instance);
+#endif
+		}
+		if (!aReq.handle) { ERROR_CORE("adapter request returned null"); return false; }
 		m_Adapter = aReq.handle;
+		INFO_CORE("WGPU adapter ready, requesting device...");
 
 		// Device (request `TimedWaitAny` so future-based polls work without
 		// the constant `Timeout waits not enabled` spam).
@@ -123,11 +139,17 @@ namespace Engine {
 
 		DeviceRequest dReq;
 		WGPURequestDeviceCallbackInfo dCb{};
-		dCb.mode      = WGPUCallbackMode_AllowProcessEvents;
+		dCb.mode      = WGPUCallbackMode_AllowSpontaneous;
 		dCb.callback  = OnDevice;
 		dCb.userdata1 = &dReq;
 		(void)wgpuAdapterRequestDevice(m_Adapter, &dDesc, dCb);
-		while (!dReq.done) wgpuInstanceProcessEvents(m_Instance);
+		while (!dReq.done) {
+#ifdef __EMSCRIPTEN__
+			emscripten_sleep(10);
+#else
+			wgpuInstanceProcessEvents(m_Instance);
+#endif
+		}
 		if (!dReq.handle) return false;
 		m_Device = dReq.handle;
 		m_Queue  = wgpuDeviceGetQueue(m_Device);

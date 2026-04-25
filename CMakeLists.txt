@@ -42,7 +42,17 @@ FetchContent_MakeAvailable(tinygltf)
 # statically linkable so no DYLD path gymnastics, and crucially its C API
 # is in lock-step with glfw3webgpu's expectations. wgpu-native v24+ uses
 # WGPUStringView which the glfw3webgpu glue doesn't grok.
-set(WEBGPU_BACKEND "DAWN" CACHE STRING "" FORCE)
+# DAWN backend on native (statically linked, Metal under the hood); the
+# emscripten compiler routes through its own port instead — pick that
+# automatically based on toolchain.
+if(EMSCRIPTEN)
+    # EMDAWNWEBGPU = browser-side Dawn (matches our Dawn C-API on native;
+    # plain EMSCRIPTEN port is older/divergent). Keeps the same
+    # WGPUStringView / future-based API everywhere.
+    set(WEBGPU_BACKEND "EMDAWNWEBGPU" CACHE STRING "" FORCE)
+else()
+    set(WEBGPU_BACKEND "DAWN" CACHE STRING "" FORCE)
+endif()
 # Use a pre-cached clone of WebGPU-distribution at /tmp/webgpu-cache to avoid
 # repeated `git fetch` failures inside FetchContent (we hit transient
 # `invalid index-pack output` errors on this network). Falls back to a
@@ -267,10 +277,14 @@ if(OPENGL_RENDERER_BUILD_SANDBOX)
         set(ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets")
 
         target_link_options(Sandbox PRIVATE
-            # WebGL 2 = OpenGL ES 3.0
-            -sMAX_WEBGL_VERSION=2
-            -sMIN_WEBGL_VERSION=2
-            # GLFW via official Emscripten contrib port
+            # WebGPU on the browser side. -sUSE_WEBGPU=1 was retired in
+            # emscripten 4.x in favour of the emdawnwebgpu port, which
+            # the WebGPU-distribution dependency wires up automatically.
+            # ASYNCIFY lets us spin synchronously on adapter / device
+            # request inside C++ (Renderer bootstrap is sequential;
+            # JS-style promise chaining doesn't fit). Costs ~5% perf.
+            -sASYNCIFY
+            # GLFW via official Emscripten contrib port (window + input).
             --use-port=contrib.glfw3
             # Memory
             -sALLOW_MEMORY_GROWTH=1
