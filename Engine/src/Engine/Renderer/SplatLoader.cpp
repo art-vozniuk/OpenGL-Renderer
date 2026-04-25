@@ -28,51 +28,28 @@ namespace Engine {
 	}
 
 
-	SplatData SplatLoader::LoadSplat(const std::string& path)
+	SplatData SplatLoader::LoadSplatFromBytes(const uint8_t* data, size_t size,
+	                                          const char* sourceLabel)
 	{
-		namespace fs = std::filesystem;
-
-		std::error_code ec;
-		const auto size = fs::file_size(path, ec);
-		if (ec) {
-			ERROR_CORE("SplatLoader: cannot stat '{0}': {1}", path, ec.message());
+		if (data == nullptr || size == 0) {
+			ERROR_CORE("SplatLoader: empty buffer for '{0}'", sourceLabel);
 			return {};
 		}
-
-		if (size == 0 || size % sizeof(PackedSplat) != 0) {
+		if (size % sizeof(PackedSplat) != 0) {
 			ERROR_CORE("SplatLoader: '{0}' is {1} bytes — not a multiple of {2}",
-			           path, (uint64_t)size, (int)sizeof(PackedSplat));
+			           sourceLabel, (uint64_t)size, (int)sizeof(PackedSplat));
 			return {};
 		}
 
-		// Use C stdio with explicit "rb" — on emscripten's MEMFS (preloaded
-		// from the .data bundle), std::ifstream with std::ios::binary has
-		// been observed to hand back corrupted bytes on some Android WebKit
-		// browsers (bbox came back ~10^30 instead of the real ~±30 range).
-		// fopen/fread go through the same FS layer but with a simpler path
-		// that has been reliable in the field.
-		std::FILE* f = std::fopen(path.c_str(), "rb");
-		if (!f) {
-			ERROR_CORE("SplatLoader: cannot open '{0}'", path);
-			return {};
-		}
+		const size_t count = size / sizeof(PackedSplat);
+		const PackedSplat* raw = reinterpret_cast<const PackedSplat*>(data);
 
-		const size_t count = static_cast<size_t>(size) / sizeof(PackedSplat);
-		std::vector<PackedSplat> raw(count);
-		const size_t got = std::fread(raw.data(), sizeof(PackedSplat), count, f);
-		std::fclose(f);
-		if (got != count) {
-			ERROR_CORE("SplatLoader: short read on '{0}' ({1}/{2} records)",
-			           path, (uint64_t)got, (uint64_t)count);
-			return {};
-		}
-
-		// Sanity log: first record's position bytes. When the deployed web
-		// bundle silently corrupts the .data file, this line surfaces
-		// the issue in the browser console ("pos0 = 1e+30, ..." vs the
+		// Sanity log: first record's position bytes. When the deployed bundle
+		// silently corrupts the buffer (cached .data mismatch, partial fetch),
+		// this line surfaces the issue ("pos0 = 1e+30, ..." vs the
 		// expected small world-space float) before any rendering happens.
 		{
-			const PackedSplat& s0 = raw.front();
+			const PackedSplat& s0 = raw[0];
 			INFO_CORE("SplatLoader: splat0.pos=({0},{1},{2}) scale=({3},{4},{5})",
 			          s0.pos[0], s0.pos[1], s0.pos[2],
 			          s0.scale[0], s0.scale[1], s0.scale[2]);
@@ -120,8 +97,44 @@ namespace Engine {
 			out.colors[i] = glm::u8vec4(p.color[0], p.color[1], p.color[2], p.color[3]);
 		}
 
-		INFO_CORE("SplatLoader: loaded {0} splats from '{1}'", (uint64_t)count, path);
+		INFO_CORE("SplatLoader: parsed {0} splats from '{1}'", (uint64_t)count, sourceLabel);
 		return out;
+	}
+
+
+	SplatData SplatLoader::LoadSplat(const std::string& path)
+	{
+		namespace fs = std::filesystem;
+
+		std::error_code ec;
+		const auto size = fs::file_size(path, ec);
+		if (ec) {
+			ERROR_CORE("SplatLoader: cannot stat '{0}': {1}", path, ec.message());
+			return {};
+		}
+
+		// Use C stdio with explicit "rb" — on emscripten's MEMFS (preloaded
+		// from the .data bundle), std::ifstream with std::ios::binary has
+		// been observed to hand back corrupted bytes on some Android WebKit
+		// browsers (bbox came back ~10^30 instead of the real ~±30 range).
+		// fopen/fread go through the same FS layer but with a simpler path
+		// that has been reliable in the field.
+		std::FILE* f = std::fopen(path.c_str(), "rb");
+		if (!f) {
+			ERROR_CORE("SplatLoader: cannot open '{0}'", path);
+			return {};
+		}
+
+		std::vector<uint8_t> buf(static_cast<size_t>(size));
+		const size_t got = std::fread(buf.data(), 1, buf.size(), f);
+		std::fclose(f);
+		if (got != buf.size()) {
+			ERROR_CORE("SplatLoader: short read on '{0}' ({1}/{2} bytes)",
+			           path, (uint64_t)got, (uint64_t)buf.size());
+			return {};
+		}
+
+		return LoadSplatFromBytes(buf.data(), buf.size(), path.c_str());
 	}
 
 }

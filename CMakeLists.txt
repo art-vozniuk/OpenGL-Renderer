@@ -204,6 +204,10 @@ if(RENDERER_BUILD_SANDBOX)
             # ASYNCIFY lets the C++ adapter / device bootstrap spin on a
             # `done` flag (emscripten_sleep yields to the JS event loop).
             -sASYNCIFY
+            # FETCH wires up emscripten_fetch (used to download .splat scenes
+            # at runtime from S3). Together with ASYNCIFY this lets the scene
+            # constructor block on the download via emscripten_sleep loops.
+            -sFETCH=1
             --use-port=contrib.glfw3
             -sALLOW_MEMORY_GROWTH=1
             -sINITIAL_MEMORY=134217728    # 128 MB

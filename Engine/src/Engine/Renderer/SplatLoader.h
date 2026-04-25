@@ -50,6 +50,12 @@ namespace Engine {
 		// Parses a .splat file from disk. Returns an empty SplatData on failure
 		// (the caller is expected to log the error and fall back gracefully).
 		static SplatData LoadSplat(const std::string& path);
+
+		// Parses a .splat blob already in memory (e.g. fetched over HTTP via
+		// emscripten_fetch). Same byte format as the on-disk version, so this
+		// is the common parser the file path also delegates to.
+		static SplatData LoadSplatFromBytes(const uint8_t* data, size_t size,
+		                                    const char* sourceLabel = "memory");
 	};
 
 }

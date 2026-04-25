@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <optional>
+#include <glm/glm.hpp>
 
 namespace Sandbox {
 
@@ -22,5 +24,23 @@ namespace Sandbox {
 	 * native builds without having to be threaded through the whole engine.
 	 */
 	void SetCommandLine(int argc, char** argv);
+
+
+	/*
+	 * Generic query / argv lookup. On web reads `?<key>=<value>` from
+	 * window.location.search; on native looks for `--<key>=<value>` in argv.
+	 * Returns std::nullopt if not present (or empty).
+	 *
+	 * Used by scenes to read runtime parameters (scene_url, scene_path, eye,
+	 * fwd, etc.) without hardcoding a query-vs-argv branch in every caller.
+	 */
+	std::optional<std::string> ReadParam(const char* key);
+
+
+	/*
+	 * Convenience: parse "x,y,z" into a vec3. Returns std::nullopt on any
+	 * formatting error (wrong arity, non-numeric, etc.).
+	 */
+	std::optional<glm::vec3> ParseVec3(const std::string& s);
 
 }
