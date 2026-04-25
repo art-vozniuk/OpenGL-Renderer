@@ -45,8 +45,12 @@ namespace Engine {
 
 		// Encode the per-frame sort dispatches into `encoder`. Must run
 		// BEFORE OpenColorPass for the same frame (compute and render
-		// can't share an encoder once a render pass is open).
-		void EncodeSort(WGPUCommandEncoder encoder, const glm::mat4& viewMatrix);
+		// can't share an encoder once a render pass is open). The
+		// projection matrix is needed alongside view to compute the
+		// world-space frustum planes for the cull pass.
+		void EncodeSort(WGPUCommandEncoder encoder,
+		                const glm::mat4& viewMatrix,
+		                const glm::mat4& projectionMatrix);
 
 		// Encode the splat draw into `pass`. Must follow EncodeSort in the
 		// same frame so `sortedIndices` reflects the current view.
@@ -123,6 +127,23 @@ namespace Engine {
 		// input to the digit-offset scan. 256 u32.
 		WGPUBuffer m_DigitTotals       = nullptr;
 
+		// Indirect-args buffers split in two to satisfy WebGPU's "no
+		// writable storage + Indirect on the same buffer in one pass"
+		// rule:
+		//   m_IndirectArgsStorage — Storage|CopyDst|CopySrc, atomically
+		//                          updated by the cull / finalize compute
+		//                          kernels via BGL binding 10. Layout:
+		//                          [vertexCount, instanceCount,
+		//                           firstVertex, firstInstance,
+		//                           wgX, wgY, wgZ].
+		//   m_IndirectArgsDraw    — Indirect|CopyDst, written each frame
+		//                          via CopyBufferToBuffer from the
+		//                          storage variant. DrawIndirect at
+		//                          offset 0; DispatchIndirect at offset
+		//                          16. Never bound as Storage.
+		WGPUBuffer m_IndirectArgsStorage = nullptr;
+		WGPUBuffer m_IndirectArgsDraw    = nullptr;
+
 		// Uniforms.
 		WGPUBuffer m_RenderUniform = nullptr;  // mat4 view, mat4 proj, vec2 viewport, vec2 pad
 		WGPUBuffer m_SortUniform   = nullptr;  // vec4 row2, u32 N, u32 shift, u32 swap, u32 numWg
@@ -137,12 +158,14 @@ namespace Engine {
 		WGPUPipelineLayout  m_RenderPL   = nullptr;
 
 		// Compute pipelines (one per WGSL entry point).
-		WGPUComputePipeline m_PipeInit         = nullptr;
-		WGPUComputePipeline m_PipeClearWgHist  = nullptr;
-		WGPUComputePipeline m_PipeWgHist       = nullptr;
+		WGPUComputePipeline m_PipeClearIndirect   = nullptr;
+		WGPUComputePipeline m_PipeInit            = nullptr;
+		WGPUComputePipeline m_PipeFinalizeArgs    = nullptr;
+		WGPUComputePipeline m_PipeClearWgHist     = nullptr;
+		WGPUComputePipeline m_PipeWgHist          = nullptr;
 		WGPUComputePipeline m_PipeColumnScan      = nullptr;
 		WGPUComputePipeline m_PipeDigitOffsetScan = nullptr;
-		WGPUComputePipeline m_PipeStableScatter = nullptr;
+		WGPUComputePipeline m_PipeStableScatter   = nullptr;
 
 		// Render pipeline.
 		WGPURenderPipeline  m_PipeRender     = nullptr;

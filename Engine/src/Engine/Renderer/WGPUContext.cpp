@@ -143,6 +143,14 @@ namespace Engine {
 		INFO_CORE("WGPU timestamp-query feature: {0}",
 		          adapterHasTimestamp ? "available" : "not available");
 
+		// The Gaussian-splat sort BGL holds 10 storage buffers (sort
+		// scratch + scales + combined indirect args) — blows past the
+		// WebGPU default of 8 per-stage. 10 is the lower-bound mobile
+		// adapters typically support, so we sit at exactly that.
+		WGPULimits requiredLimits = WGPU_LIMITS_INIT;
+		requiredLimits.maxStorageBuffersPerShaderStage = 10;
+		dDesc.requiredLimits = &requiredLimits;
+
 		WGPUDeviceLostCallbackInfo lostCb{};
 		lostCb.mode     = WGPUCallbackMode_AllowProcessEvents;
 		lostCb.callback = OnDeviceLost;

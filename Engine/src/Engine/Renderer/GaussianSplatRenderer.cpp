@@ -31,10 +31,10 @@ namespace Engine {
 		};
 		static_assert(sizeof(RenderUniforms) == 144, "render uniform layout drift");
 
-		// Sort uniform: 36 bytes of payload (5x u32 + vec4f), but bound
-		// with dynamic offset so each "config" must occupy a 256-byte
-		// stride.
-		constexpr size_t kSortUniformPayload = 48;
+		// Sort uniform: 32 bytes of scalar payload + 96 bytes of frustum
+		// planes (6 vec4). Bound with dynamic offset so each "config"
+		// occupies a 256-byte stride.
+		constexpr size_t kSortUniformPayload = 128;
 		constexpr size_t kSortUniformStride  = 256;
 		constexpr int    kSortConfigInit  = 0;
 		constexpr int    kSortConfigPass0 = 1;  // byte 0 (low), idxPing -> idxPong
@@ -50,8 +50,9 @@ namespace Engine {
 			uint32_t digitShift;
 			uint32_t swap;        // 0 -> read ping write pong, 1 -> reversed
 			uint32_t numWg;       // ceil(N / 256)
+			float    frustum[6][4]; // 6 planes (a, b, c, d), Gribb-Hartmann from VP
 		};
-		static_assert(sizeof(SortUniform) == 32);
+		static_assert(sizeof(SortUniform) == 128);
 
 		std::string LoadShaderSource(const std::string& relPath)
 		{
@@ -193,8 +194,8 @@ namespace Engine {
 
 	void GaussianSplatRenderer::CreatePipelines()
 	{
-		// ---- Sort bind group layout (dynamic-offset uniform + 8 storage) ----
-		std::array<WGPUBindGroupLayoutEntry, 9> sEntries{};
+		// ---- Sort bind group layout (dynamic-offset uniform + 10 storage) ----
+		std::array<WGPUBindGroupLayoutEntry, 11> sEntries{};
 
 		sEntries[0].binding    = 0;
 		sEntries[0].visibility = WGPUShaderStage_Compute;
@@ -212,15 +213,17 @@ namespace Engine {
 		};
 		// 1=positions(read), 2=depths(rw), 3=idxPing(rw), 4=idxPong(rw),
 		// 5=wgHist(rw, atomic), 6=wgOffset(rw), 7=globalDigitOffset(rw),
-		// 8=digitTotals(rw)
-		sEntries[1] = stor(1, WGPUBufferBindingType_ReadOnlyStorage);
-		sEntries[2] = stor(2, WGPUBufferBindingType_Storage);
-		sEntries[3] = stor(3, WGPUBufferBindingType_Storage);
-		sEntries[4] = stor(4, WGPUBufferBindingType_Storage);
-		sEntries[5] = stor(5, WGPUBufferBindingType_Storage);
-		sEntries[6] = stor(6, WGPUBufferBindingType_Storage);
-		sEntries[7] = stor(7, WGPUBufferBindingType_Storage);
-		sEntries[8] = stor(8, WGPUBufferBindingType_Storage);
+		// 8=digitTotals(rw), 9=scales(read), 10=indirectArgs(rw atomic, draw+dispatch combined)
+		sEntries[1]  = stor(1,  WGPUBufferBindingType_ReadOnlyStorage);
+		sEntries[2]  = stor(2,  WGPUBufferBindingType_Storage);
+		sEntries[3]  = stor(3,  WGPUBufferBindingType_Storage);
+		sEntries[4]  = stor(4,  WGPUBufferBindingType_Storage);
+		sEntries[5]  = stor(5,  WGPUBufferBindingType_Storage);
+		sEntries[6]  = stor(6,  WGPUBufferBindingType_Storage);
+		sEntries[7]  = stor(7,  WGPUBufferBindingType_Storage);
+		sEntries[8]  = stor(8,  WGPUBufferBindingType_Storage);
+		sEntries[9]  = stor(9,  WGPUBufferBindingType_ReadOnlyStorage);
+		sEntries[10] = stor(10, WGPUBufferBindingType_Storage);
 
 		WGPUBindGroupLayoutDescriptor sBglDesc{};
 		sBglDesc.label      = SV("gsplat-sort-bgl");
@@ -252,7 +255,9 @@ namespace Engine {
 			d.compute.entryPoint       = SV(entry);
 			return wgpuDeviceCreateComputePipeline(m_Ctx->Device(), &d);
 		};
+		m_PipeClearIndirect    = MakeCompute("cs_clear_indirect",    "gsplat-cs-clear-indirect");
 		m_PipeInit             = MakeCompute("cs_init_depth",        "gsplat-cs-init");
+		m_PipeFinalizeArgs     = MakeCompute("cs_finalize_args",     "gsplat-cs-finalize-args");
 		m_PipeClearWgHist      = MakeCompute("cs_clear_wg_hist",     "gsplat-cs-clear-wghist");
 		m_PipeWgHist           = MakeCompute("cs_wg_hist",           "gsplat-cs-wghist");
 		m_PipeColumnScan       = MakeCompute("cs_column_scan",       "gsplat-cs-column-scan");
@@ -388,6 +393,30 @@ namespace Engine {
 		MakeStorage(m_IdxPing, m_Count * sizeof(uint32_t), "gsplat-idx-ping");
 		MakeStorage(m_IdxPong, m_Count * sizeof(uint32_t), "gsplat-idx-pong");
 
+		// Indirect-args buffers, split (see header comment for why):
+		//   - storage variant: Storage|CopyDst|CopySrc — bound to the
+		//     sort BGL, atomic-updated by compute kernels.
+		//   - draw variant: Indirect|CopyDst — copied into each frame,
+		//     consumed by DrawIndirect + DispatchIndirect.
+		auto MakeBuf = [&](WGPUBuffer& dst, size_t bytes,
+		                    WGPUBufferUsage usage, const char* lbl) {
+			if (dst) wgpuBufferRelease(dst);
+			WGPUBufferDescriptor d{};
+			d.label = SV(lbl);
+			d.usage = usage;
+			d.size  = bytes;
+			dst = wgpuDeviceCreateBuffer(m_Ctx->Device(), &d);
+		};
+		MakeBuf(m_IndirectArgsStorage, 7u * sizeof(uint32_t),
+		        (WGPUBufferUsage)(WGPUBufferUsage_Storage |
+		                          WGPUBufferUsage_CopyDst |
+		                          WGPUBufferUsage_CopySrc),
+		        "gsplat-indirect-args-storage");
+		MakeBuf(m_IndirectArgsDraw,    7u * sizeof(uint32_t),
+		        (WGPUBufferUsage)(WGPUBufferUsage_Indirect |
+		                          WGPUBufferUsage_CopyDst),
+		        "gsplat-indirect-args-draw");
+
 		// num_wg = ceil(N / 256) — needed for wgHist / wgOffset sizing AND
 		// passed to the shader via the sort uniform.
 		const uint32_t numWg = (uint32_t)((m_Count + 255u) / 256u);
@@ -397,19 +426,21 @@ namespace Engine {
 
 		// Build sort + render bind groups now that all buffers exist.
 		{
-			std::array<WGPUBindGroupEntry, 9> e{};
+			std::array<WGPUBindGroupEntry, 11> e{};
 			auto fill = [&](size_t i, uint32_t b, WGPUBuffer buf, uint64_t size) {
 				e[i].binding = b; e[i].buffer = buf; e[i].size = size;
 			};
-			fill(0, 0, m_SortUniform,        kSortUniformPayload);
-			fill(1, 1, m_Pos,                WGPU_WHOLE_SIZE);
-			fill(2, 2, m_Depths,             WGPU_WHOLE_SIZE);
-			fill(3, 3, m_IdxPing,            WGPU_WHOLE_SIZE);
-			fill(4, 4, m_IdxPong,            WGPU_WHOLE_SIZE);
-			fill(5, 5, m_WgHist,             WGPU_WHOLE_SIZE);
-			fill(6, 6, m_WgOffset,           WGPU_WHOLE_SIZE);
-			fill(7, 7, m_GlobalDigitOffset,  WGPU_WHOLE_SIZE);
-			fill(8, 8, m_DigitTotals,        WGPU_WHOLE_SIZE);
+			fill(0,  0,  m_SortUniform,        kSortUniformPayload);
+			fill(1,  1,  m_Pos,                WGPU_WHOLE_SIZE);
+			fill(2,  2,  m_Depths,             WGPU_WHOLE_SIZE);
+			fill(3,  3,  m_IdxPing,            WGPU_WHOLE_SIZE);
+			fill(4,  4,  m_IdxPong,            WGPU_WHOLE_SIZE);
+			fill(5,  5,  m_WgHist,             WGPU_WHOLE_SIZE);
+			fill(6,  6,  m_WgOffset,           WGPU_WHOLE_SIZE);
+			fill(7,  7,  m_GlobalDigitOffset,  WGPU_WHOLE_SIZE);
+			fill(8,  8,  m_DigitTotals,        WGPU_WHOLE_SIZE);
+			fill(9,  9,  m_Scale,              WGPU_WHOLE_SIZE);
+			fill(10, 10, m_IndirectArgsStorage, WGPU_WHOLE_SIZE);
 			WGPUBindGroupDescriptor bgd{};
 			bgd.label      = SV("gsplat-sort-bg");
 			bgd.layout     = m_SortBGL;
@@ -444,11 +475,45 @@ namespace Engine {
 	}
 
 
-	void GaussianSplatRenderer::EncodeSort(WGPUCommandEncoder encoder, const glm::mat4& viewMatrix)
+	void GaussianSplatRenderer::EncodeSort(WGPUCommandEncoder encoder,
+	                                        const glm::mat4& viewMatrix,
+	                                        const glm::mat4& projectionMatrix)
 	{
 		if (m_Count == 0) return;
 
 		const uint32_t numWg = ((uint32_t)m_Count + 255u) / 256u;
+
+		// Frustum planes from the view-projection matrix (Gribb-Hartmann).
+		// WebGPU clip space has Z in [0, 1], so the near plane is just the
+		// row2 plane (no row3 term) and the far plane is row3 - row2.
+		// Each plane is normalised so the sphere test compares signed
+		// distance against the splat radius in world units.
+		float planes[6][4];
+		{
+			const glm::mat4 vp = projectionMatrix * viewMatrix;
+			// Rows of vp (column-major glm).
+			const glm::vec4 r0(vp[0][0], vp[1][0], vp[2][0], vp[3][0]);
+			const glm::vec4 r1(vp[0][1], vp[1][1], vp[2][1], vp[3][1]);
+			const glm::vec4 r2(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);
+			const glm::vec4 r3(vp[0][3], vp[1][3], vp[2][3], vp[3][3]);
+			const glm::vec4 raw[6] = {
+				r3 + r0,   // left
+				r3 - r0,   // right
+				r3 + r1,   // bottom
+				r3 - r1,   // top
+				r2,        // near (WebGPU [0,1] depth)
+				r3 - r2,   // far
+			};
+			for (int k = 0; k < 6; ++k) {
+				const glm::vec3 n(raw[k]);
+				const float len = glm::length(n);
+				const float inv = (len > 0.0f) ? 1.0f / len : 1.0f;
+				planes[k][0] = n.x * inv;
+				planes[k][1] = n.y * inv;
+				planes[k][2] = n.z * inv;
+				planes[k][3] = raw[k].w * inv;
+			}
+		}
 
 		// Build all 5 sort-uniform configs into a single contiguous block,
 		// then one writeBuffer to push them.
@@ -463,6 +528,7 @@ namespace Engine {
 			su.digitShift  = shift;
 			su.swap        = swap;
 			su.numWg       = numWg;
+			std::memcpy(su.frustum, planes, sizeof(planes));
 			std::memcpy(blob.data() + slot * kSortUniformStride, &su, sizeof(su));
 		};
 		WriteCfg(kSortConfigInit,  0,  0);
@@ -487,16 +553,41 @@ namespace Engine {
 		// memory-ordering bugs across dispatches inside a pass when
 		// atomics + large storage buffers mix. Cross-pass ordering is
 		// unambiguous — costs us a handful of pass starts (~µs each).
+		// Direct dispatch with a static workgroup count. Used for kernels
+		// whose work doesn't shrink with visible-splat count (init_depth
+		// runs over full N, clear_wg_hist clears the full max-N table,
+		// column_scan is always 256 workgroups).
 		auto Dispatch = [&](WGPUComputePipeline pipe, int cfg, uint32_t wgX,
 		                    const char* label,
 		                    const WGPUPassTimestampWrites* tw = nullptr) {
 			WGPUComputePassDescriptor cpd{};
 			cpd.label = SV(label);
-			cpd.timestampWrites = tw;  // null when timestamps are disabled
+			cpd.timestampWrites = tw;
 			WGPUComputePassEncoder cp = wgpuCommandEncoderBeginComputePass(encoder, &cpd);
 			wgpuComputePassEncoderSetPipeline(cp, pipe);
 			SetSortBG(cp, cfg);
 			wgpuComputePassEncoderDispatchWorkgroups(cp, wgX, 1, 1);
+			wgpuComputePassEncoderEnd(cp);
+			wgpuComputePassEncoderRelease(cp);
+		};
+
+		// Indirect dispatch: workgroup count is fetched at execution time
+		// from m_DispatchArgs (filled by cs_finalize_args from the
+		// visibleCount atomic). This is the lever that makes wg_hist /
+		// stable_scatter scale with the visible-splat fraction instead
+		// of full N — the whole point of the cull + compaction.
+		auto DispatchIndirect = [&](WGPUComputePipeline pipe, int cfg,
+		                            const char* label,
+		                            const WGPUPassTimestampWrites* tw = nullptr) {
+			WGPUComputePassDescriptor cpd{};
+			cpd.label = SV(label);
+			cpd.timestampWrites = tw;
+			WGPUComputePassEncoder cp = wgpuCommandEncoderBeginComputePass(encoder, &cpd);
+			wgpuComputePassEncoderSetPipeline(cp, pipe);
+			SetSortBG(cp, cfg);
+			// Dispatch args live at offset 16 of the draw-variant
+			// buffer (the first 16 bytes hold the DrawIndirect args).
+			wgpuComputePassEncoderDispatchWorkgroupsIndirect(cp, m_IndirectArgsDraw, 16);
 			wgpuComputePassEncoderEnd(cp);
 			wgpuComputePassEncoderRelease(cp);
 		};
@@ -506,23 +597,39 @@ namespace Engine {
 		const auto* sortBeginTw = m_TimestampsEnabled ? &m_SortBeginTimestampWrites : nullptr;
 		const auto* sortEndTw   = m_TimestampsEnabled ? &m_SortEndTimestampWrites   : nullptr;
 
-		Dispatch(m_PipeInit, kSortConfigInit, wgN, "gsplat-sort-init", sortBeginTw);
+		// Frame-start setup: zero the indirect-draw + dispatch-args
+		// buffers, frustum-cull + compact, then translate the visible
+		// counter into compute-dispatch-indirect args. After this
+		// block the storage variant of the indirect-args buffer holds
+		// the final values; copy them into the Indirect-flagged twin
+		// before the byte passes consume it.
+		Dispatch(m_PipeClearIndirect, kSortConfigInit, 1, "gsplat-clear-indirect");
+		Dispatch(m_PipeInit,          kSortConfigInit, wgN, "gsplat-sort-init", sortBeginTw);
+		Dispatch(m_PipeFinalizeArgs,  kSortConfigInit, 1, "gsplat-finalize-args");
+
+		wgpuCommandEncoderCopyBufferToBuffer(
+			encoder,
+			m_IndirectArgsStorage, 0,
+			m_IndirectArgsDraw,    0,
+			7u * sizeof(uint32_t));
 
 		auto OnePass = [&](int cfg, bool isLast) {
 			// Stable workgroup-local radix:
 			//   1) clear per-workgroup histogram (numWg * 256 entries)
-			//   2) per-workgroup count (parallel)
+			//   2) per-workgroup count (parallel — indirect dispatch
+			//      sized to visible splats only)
 			//   3a) column scan: 256 workgroups parallel-scan each digit's
 			//       column of wgHist into wgOffset; emit digitTotals[d].
 			//   3b) digit-offset scan: tiny single-thread prefix over
 			//       digitTotals[256] -> globalDigitOffset[256].
-			//   4) stable scatter using per-workgroup local rank.
+			//   4) stable scatter using per-workgroup local rank
+			//      (indirect dispatch — sized to visible only).
 			Dispatch(m_PipeClearWgHist,     cfg, wgClear, "gsplat-sort-clear-wghist");
-			Dispatch(m_PipeWgHist,          cfg, wgN,     "gsplat-sort-wghist");
+			DispatchIndirect(m_PipeWgHist,        cfg,    "gsplat-sort-wghist");
 			Dispatch(m_PipeColumnScan,      cfg, 256,     "gsplat-sort-col-scan");
 			Dispatch(m_PipeDigitOffsetScan, cfg, 1,       "gsplat-sort-digit-scan");
-			Dispatch(m_PipeStableScatter,   cfg, wgN,     "gsplat-sort-stable-scatter",
-			         isLast ? sortEndTw : nullptr);
+			DispatchIndirect(m_PipeStableScatter, cfg,    "gsplat-sort-stable-scatter",
+			                 isLast ? sortEndTw : nullptr);
 		};
 		OnePass(kSortConfigPass0, false);
 		OnePass(kSortConfigPass1, false);
@@ -647,9 +754,11 @@ namespace Engine {
 
 		wgpuRenderPassEncoderSetPipeline(pass, m_PipeRender);
 		wgpuRenderPassEncoderSetBindGroup(pass, 0, m_RenderBG, 0, nullptr);
-		// Draw 6 verts/instance (two triangles), N instances. No index/vertex
-		// buffer needed — corners are a const in the shader.
-		wgpuRenderPassEncoderDraw(pass, 6, (uint32_t)m_Count, 0, 0);
+		// Indirect draw: instanceCount is the visible-splat counter that
+		// cs_init_depth atomic-incremented. Saves running the vertex
+		// shader on splats the cull pass already rejected — the bigger
+		// half of the perf win when most of the scene is off-screen.
+		wgpuRenderPassEncoderDrawIndirect(pass, m_IndirectArgsDraw, 0);
 	}
 
 
@@ -659,8 +768,11 @@ namespace Engine {
 		Drop(m_Pos); Drop(m_Scale); Drop(m_Rot); Drop(m_Color);
 		Drop(m_Depths); Drop(m_IdxPing); Drop(m_IdxPong);
 		Drop(m_WgHist); Drop(m_WgOffset); Drop(m_GlobalDigitOffset); Drop(m_DigitTotals);
+		Drop(m_IndirectArgsStorage); Drop(m_IndirectArgsDraw);
 		Drop(m_RenderUniform); Drop(m_SortUniform);
 
+		if (m_PipeClearIndirect) { wgpuComputePipelineRelease(m_PipeClearIndirect); m_PipeClearIndirect = nullptr; }
+		if (m_PipeFinalizeArgs)  { wgpuComputePipelineRelease(m_PipeFinalizeArgs);  m_PipeFinalizeArgs  = nullptr; }
 		if (m_PipeInit)          { wgpuComputePipelineRelease(m_PipeInit);          m_PipeInit          = nullptr; }
 		if (m_PipeClearWgHist)   { wgpuComputePipelineRelease(m_PipeClearWgHist);   m_PipeClearWgHist   = nullptr; }
 		if (m_PipeWgHist)        { wgpuComputePipelineRelease(m_PipeWgHist);        m_PipeWgHist        = nullptr; }

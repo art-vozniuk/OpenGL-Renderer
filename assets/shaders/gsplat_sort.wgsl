@@ -42,6 +42,11 @@ struct Uniforms {
     digitShift:  u32,
     swap:        u32,         // 0 -> read ping write pong, 1 -> swap
     numWg:       u32,         // ceil(N / WG)
+    // World-space frustum planes (Gribb-Hartmann from view-projection).
+    // Convention: dot(plane.xyz, p) + plane.w > 0  ->  inside half-space.
+    // Order: left, right, bottom, top, near, far. Used by cs_init_depth
+    // to cull off-screen splats out of the render before sort runs.
+    frustum:     array<vec4<f32>, 6>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -59,6 +64,23 @@ struct Uniforms {
 // Per-digit total count (one scan output, fed into the digit-offset
 // scan). 256 entries.
 @group(0) @binding(8) var<storage, read_write>      digitTotals:       array<u32, 256>;
+// Per-splat scales (vec4 padded). Read by cs_init_depth for the
+// conservative bounding-sphere radius used in the frustum test.
+@group(0) @binding(9) var<storage, read>            scales:           array<vec4<f32>>;
+// Indirect-draw arguments written by the cull pass + used by the
+// render's DrawIndirect. Layout matches GPUDrawIndirectArgs:
+//   [0] vertexCount   = 6   (set once per frame by cs_clear_indirect)
+//   [1] instanceCount = visible-splat count (atomicAdd in cs_init_depth)
+//   [2] firstVertex   = 0
+//   [3] firstInstance = 0
+// Combined indirect-args block. Single binding to keep the BGL under
+// the maxStorageBuffersPerShaderStage = 10 lower bound that mobile
+// browsers honour. Layout (offsets in 4-byte u32):
+//   [0..3] = DrawIndirect args  (vertexCount, instanceCount, firstVertex, firstInstance)
+//   [4..6] = DispatchIndirect args  (wgX, wgY, wgZ)  — used by cs_wg_hist + cs_stable_scatter
+// `indirectArgs[1]` doubles as the visible-splat counter that gates
+// the dynamic bounds check inside every sort kernel.
+@group(0) @binding(10) var<storage, read_write>     indirectArgs:     array<atomic<u32>, 7>;
 
 const WG: u32 = 256u;
 
@@ -70,13 +92,64 @@ fn writeIdxOut(i: u32, v: u32) {
 }
 
 
-// One-shot at frame start: compute view-space depth as sortable u32 +
-// initialise idxPing as the identity permutation.
+// Reset the indirect-draw argument buffer. Run as a single thread
+// every frame before cs_init_depth so the atomic counter starts at 0
+// and the constant fields are correct.
+@compute @workgroup_size(1)
+fn cs_clear_indirect(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x != 0u) { return; }
+    atomicStore(&indirectArgs[0], 6u);   // vertexCount   (two triangles)
+    atomicStore(&indirectArgs[1], 0u);   // instanceCount (atomicAdd target)
+    atomicStore(&indirectArgs[2], 0u);   // firstVertex
+    atomicStore(&indirectArgs[3], 0u);   // firstInstance
+    atomicStore(&indirectArgs[4], 0u);   // dispatch wgX (cs_finalize_args fills)
+    atomicStore(&indirectArgs[5], 1u);   // dispatch wgY
+    atomicStore(&indirectArgs[6], 1u);   // dispatch wgZ
+}
+
+
+// True if the sphere at `c` with radius `r` lies entirely outside the
+// frustum half-spaces. Conservative — false-positives only when the
+// sphere actually does intersect, never the other way round.
+fn sphere_outside_frustum(c: vec3<f32>, r: f32) -> bool {
+    for (var k: u32 = 0u; k < 6u; k = k + 1u) {
+        let p = u.frustum[k];
+        if (dot(p.xyz, c) + p.w < -r) { return true; }
+    }
+    return false;
+}
+
+
+// Pre-sort compaction: for every visible splat we claim a contiguous
+// slot in idxPing via atomicAdd, write the original index there, and
+// store the depth key at the splat's NATIVE slot in `depths`. The
+// sort then runs over only [0, visibleCount) — invisible splats never
+// participate in any byte pass.
+//
+// Memory model:
+//   depths[orig_i]      = sort key, native-indexed (stable across frames
+//                         for visible orig_i; stale for currently-culled
+//                         orig_i but never read since they're not in
+//                         idxPing's compacted range).
+//   idxPing[slot]       = orig_i for visible splats only, slot in
+//                         [0, visibleCount).
 @compute @workgroup_size(WG)
 fn cs_init_depth(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if (i >= u.N) { return; }
+
     let p = positions[i].xyz;
+    // 3-sigma conservative radius. Matches the quad size the render
+    // shader emits, so anything that would draw nothing through the
+    // existing clip-space test will also fail the frustum test here.
+    let s = scales[i].xyz;
+    let r = max(s.x, max(s.y, s.z)) * 3.0;
+    if (sphere_outside_frustum(p, r)) { return; }
+
+    // Visible: claim a slot, compute key.
+    let slot = atomicAdd(&indirectArgs[1], 1u);
+    idxPing[slot] = i;
+
     let z = u.viewRow2.x * p.x + u.viewRow2.y * p.y + u.viewRow2.z * p.z + u.viewRow2.w;
     let bits = bitcast<u32>(z);
     var key: u32;
@@ -86,7 +159,19 @@ fn cs_init_depth(@builtin(global_invocation_id) gid: vec3<u32>) {
         key = bits ^ 0x80000000u;
     }
     depths[i] = key;
-    idxPing[i] = i;
+}
+
+
+// Translate the visible counter into compute-dispatch-indirect args
+// for the rest of the sort pipeline. Single thread; called once per
+// frame between cs_init_depth and the byte passes.
+@compute @workgroup_size(1)
+fn cs_finalize_args(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x != 0u) { return; }
+    let visible = atomicLoad(&indirectArgs[1]);
+    let wgX = (visible + WG - 1u) / WG;
+    atomicStore(&indirectArgs[4], wgX);
+    // y and z were set to 1 in cs_clear_indirect — leave alone.
 }
 
 
@@ -113,8 +198,12 @@ fn cs_wg_hist(@builtin(global_invocation_id) gid: vec3<u32>,
     if (lid < 256u) { atomicStore(&sLocalHist[lid], 0u); }
     workgroupBarrier();
 
+    // visibleCount lives in indirectArgs[1] — bounds the compacted
+    // sort. Threads beyond it are tail of the last workgroup; they
+    // still hit the barriers, just skip the work.
+    let visibleCount = atomicLoad(&indirectArgs[1]);
     let i = gid.x;
-    if (i < u.N) {
+    if (i < visibleCount) {
         let idx = idxIn(i);
         let key = depths[idx];
         let digit = (key >> u.digitShift) & 0xFFu;
@@ -221,10 +310,14 @@ var<workgroup> sDigit: array<u32, WG>;
 fn cs_stable_scatter(@builtin(global_invocation_id) gid: vec3<u32>,
                      @builtin(workgroup_id) wgid: vec3<u32>,
                      @builtin(local_invocation_index) lid: u32) {
+    // Same dynamic-bound trick as cs_wg_hist — gate on visibleCount,
+    // not the static u.N. Sentinel digit keeps tail threads in the
+    // shared-mem rank loop without writing.
+    let visibleCount = atomicLoad(&indirectArgs[1]);
     let i = gid.x;
     var digit: u32 = 256u;  // sentinel meaning "no element"
     var idx: u32 = 0u;
-    if (i < u.N) {
+    if (i < visibleCount) {
         idx = idxIn(i);
         let key = depths[idx];
         digit = (key >> u.digitShift) & 0xFFu;

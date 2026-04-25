@@ -230,8 +230,10 @@ namespace Sandbox {
 		// re-sorting is just one buffer rewrite, not the bulk reshuffle
 		// the GL renderer used to do.
 		const double encodeStart = glfwGetTime();
-		const glm::mat4& view = m_Camera.GetRenderCamera()->GetViewMatrix();
-		if (m_Splats) m_Splats->EncodeSort(Renderer::Encoder(), view);
+		const auto& cam = m_Camera.GetRenderCamera();
+		const glm::mat4& view = cam->GetViewMatrix();
+		const glm::mat4& proj = cam->GetProjectionMatrix();
+		if (m_Splats) m_Splats->EncodeSort(Renderer::Encoder(), view, proj);
 
 		const WGPUPassTimestampWrites* renderTw =
 			m_Splats ? m_Splats->GetRenderPassTimestampWrites() : nullptr;
