@@ -131,10 +131,19 @@ namespace Engine {
 		return g.frame.valid;
 	}
 
-	void Renderer::OpenColorPass(float r, float gC, float b, float a)
+	void Renderer::OpenColorPass(float r, float gC, float b, float a,
+	                             const WGPUPassTimestampWrites* timestampWrites)
 	{
 		if (!g.frame.valid || g.pass) return;
-		g.pass = g.ctx->OpenColorPass(g.frame, r, gC, b, a);
+		g.pass = g.ctx->OpenColorPass(g.frame, r, gC, b, a, timestampWrites);
+	}
+
+	void Renderer::ClosePass()
+	{
+		if (g.pass) {
+			g.ctx->ClosePass(g.pass);
+			g.pass = nullptr;
+		}
 	}
 
 	void Renderer::EndScene()

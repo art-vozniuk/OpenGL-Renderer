@@ -26,10 +26,11 @@ namespace Sandbox {
 	private:
 		Engine::FlyCamera m_Camera;
 		std::unique_ptr<Engine::GaussianSplatRenderer> m_Splats;
-		size_t m_SplatCount = 0;
-		int    m_FrameCount = 0;
-		int    m_FpsCounter = 0;
-		double m_FpsT0      = 0.0;
+		size_t m_SplatCount   = 0;
+		int    m_FrameCount   = 0;
+		int    m_FpsCounter   = 0;
+		double m_FpsT0        = 0.0;
+		double m_PrevFrameStart = 0.0;  // for frame-interval ms metric
 	};
 
 }

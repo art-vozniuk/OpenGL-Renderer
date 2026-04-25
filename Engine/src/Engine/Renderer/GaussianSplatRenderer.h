@@ -4,6 +4,7 @@
 #include "Camera.h"
 #include "WGPUContext.h"
 #include "../Core.h"
+#include "../PerfMetrics.h"
 
 #include <cstdint>
 #include <vector>
@@ -54,6 +55,45 @@ namespace Engine {
 		                  const glm::vec2& viewportSize);
 
 		size_t SplatCount() const { return m_Count; }
+
+		// ---- Perf instrumentation ------------------------------------------
+		// Owned PerfMetrics struct — the scene reads cur/avg/max from this and
+		// posts a JSON snapshot to the parent frame each tick. Always
+		// populated; `gpuTimingsValid` indicates whether GPU samples are
+		// trustworthy (only when the device granted the timestamp-query
+		// feature).
+		PerfMetrics&       Metrics()       { return m_Metrics; }
+		const PerfMetrics& Metrics() const { return m_Metrics; }
+
+		// Pointer the scene must pass to Renderer::OpenColorPass so the
+		// render pass writes a begin/end timestamp. Nullptr when timestamp
+		// queries aren't available — caller skips the field.
+		const WGPUPassTimestampWrites* GetRenderPassTimestampWrites() const
+		{
+			return m_TimestampsEnabled ? &m_RenderTimestampWrites : nullptr;
+		}
+
+		// Resolve the frame's timestamp queries into the next ring slot and
+		// kick off async map-back of the slot whose data is ready. Call
+		// once per frame, AFTER EncodeRender, while `encoder` is still open.
+		void ResolveAndReadTimestamps(WGPUCommandEncoder encoder);
+
+		// Per-frame tick called from the scene at the START of a new frame
+		// (i.e. AFTER the previous frame's queue submit). Drives async
+		// MapAsync requests on resolved ring slots and pushes any
+		// already-mapped samples into m_Metrics. Cheap when there's
+		// nothing to do.
+		void TickPerf();
+
+		// Inner type exposed publicly so the file-scope mapAsync callback
+		// trampoline can hold a pointer to a slot. Not part of the
+		// supported renderer API surface — treat as implementation detail.
+		struct TsSlot
+		{
+			WGPUBuffer mapBuf         = nullptr;
+			bool       resolved       = false;
+			bool       mappingPending = false;
+		};
 
 	private:
 		void CreateUniformBuffer();
@@ -114,6 +154,35 @@ namespace Engine {
 		bool m_FinalIsPing = true;
 
 		size_t m_Count = 0;
+
+		// ---- Perf instrumentation ------------------------------------------
+		PerfMetrics m_Metrics;
+
+		// Timestamp infrastructure. 4 slots: sort-begin (0), sort-end (1),
+		// render-begin (2), render-end (3). Render-side begin/end is set
+		// via the render-pass descriptor (RenderPassTimestampWrites);
+		// sort-side via compute-pass descriptors injected in EncodeSort.
+		bool                                 m_TimestampsEnabled = false;
+		WGPUQuerySet                         m_QuerySet         = nullptr;
+		WGPUBuffer                           m_TsResolveBuf     = nullptr;
+		WGPUPassTimestampWrites       m_SortBeginTimestampWrites{};
+		WGPUPassTimestampWrites       m_SortEndTimestampWrites{};
+		WGPUPassTimestampWrites        m_RenderTimestampWrites{};
+
+		// 3-deep ring of MAP_READ-mappable buffers so the GPU can be writing
+		// frame N while CPU reads frame N-2. The TsSlot struct itself is
+		// declared above (public for callback access).
+		static constexpr int kTsRingSize = 3;
+		TsSlot                          m_TsRing[kTsRingSize];
+		int                             m_TsRingNext = 0;
+		double                          m_TsPeriodNs = 1.0;  // device timestamp tick → ns; Dawn currently always ns
+
+		// CPU-side encode timer.
+		double m_LastFrameStart = 0.0;
+
+		// Helpers
+		void CreateTimestampResources();
+		void DestroyTimestampResources();
 	};
 
 }

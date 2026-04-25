@@ -112,6 +112,75 @@ namespace Engine {
 		};
 		m_GlobalDigitOffset = make256("gsplat-globalDigitOffset");
 		m_DigitTotals       = make256("gsplat-digitTotals");
+
+		CreateTimestampResources();
+	}
+
+
+	void GaussianSplatRenderer::CreateTimestampResources()
+	{
+		m_TimestampsEnabled = m_Ctx->HasTimestampQueries();
+		m_Metrics.gpuTimingsValid = m_TimestampsEnabled;
+		if (!m_TimestampsEnabled) {
+			INFO_CORE("gsplat: timestamp queries unavailable, perf overlay shows CPU-only timings");
+			return;
+		}
+
+		// 4 slots: sort-begin / sort-end / render-begin / render-end.
+		WGPUQuerySetDescriptor qd{};
+		qd.label = SV("gsplat-perf-querySet");
+		qd.type  = WGPUQueryType_Timestamp;
+		qd.count = 4;
+		m_QuerySet = wgpuDeviceCreateQuerySet(m_Ctx->Device(), &qd);
+
+		// Resolve buffer is GPU-only (target of ResolveQuerySet).
+		WGPUBufferDescriptor rd{};
+		rd.label = SV("gsplat-perf-resolveBuf");
+		rd.usage = WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc;
+		rd.size  = 4u * sizeof(uint64_t);
+		m_TsResolveBuf = wgpuDeviceCreateBuffer(m_Ctx->Device(), &rd);
+
+		// Mappable readback ring. Each slot is filled by CopyBufferToBuffer
+		// from the resolve buffer; once GPU work is done we MapAsync the
+		// slot and read u64 timestamps out.
+		for (int i = 0; i < kTsRingSize; ++i) {
+			WGPUBufferDescriptor md{};
+			md.label = SV("gsplat-perf-mapBuf");
+			md.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+			md.size  = 4u * sizeof(uint64_t);
+			m_TsRing[i].mapBuf = wgpuDeviceCreateBuffer(m_Ctx->Device(), &md);
+		}
+
+		// Pre-bake the timestampWrites structs we hand out to pass
+		// descriptors. These reference m_QuerySet directly — never
+		// recreated at runtime, so address-stable for the whole renderer
+		// lifetime.
+		m_SortBeginTimestampWrites.querySet                  = m_QuerySet;
+		m_SortBeginTimestampWrites.beginningOfPassWriteIndex = 0;
+		m_SortBeginTimestampWrites.endOfPassWriteIndex       = WGPU_QUERY_SET_INDEX_UNDEFINED;
+
+		m_SortEndTimestampWrites.querySet                    = m_QuerySet;
+		m_SortEndTimestampWrites.beginningOfPassWriteIndex   = WGPU_QUERY_SET_INDEX_UNDEFINED;
+		m_SortEndTimestampWrites.endOfPassWriteIndex         = 1;
+
+		m_RenderTimestampWrites.querySet                     = m_QuerySet;
+		m_RenderTimestampWrites.beginningOfPassWriteIndex    = 2;
+		m_RenderTimestampWrites.endOfPassWriteIndex          = 3;
+
+		INFO_CORE("gsplat: GPU timestamp queries enabled (4 slots, 3-deep readback ring)");
+	}
+
+
+	void GaussianSplatRenderer::DestroyTimestampResources()
+	{
+		if (m_QuerySet)     { wgpuQuerySetRelease(m_QuerySet);    m_QuerySet     = nullptr; }
+		if (m_TsResolveBuf) { wgpuBufferRelease(m_TsResolveBuf);  m_TsResolveBuf = nullptr; }
+		for (auto& s : m_TsRing) {
+			if (s.mapBuf) { wgpuBufferRelease(s.mapBuf); s.mapBuf = nullptr; }
+			s.resolved = false;
+			s.mappingPending = false;
+		}
+		m_TimestampsEnabled = false;
 	}
 
 
@@ -411,9 +480,12 @@ namespace Engine {
 		// memory-ordering bugs across dispatches inside a pass when
 		// atomics + large storage buffers mix. Cross-pass ordering is
 		// unambiguous — costs us a handful of pass starts (~µs each).
-		auto Dispatch = [&](WGPUComputePipeline pipe, int cfg, uint32_t wgX, const char* label) {
+		auto Dispatch = [&](WGPUComputePipeline pipe, int cfg, uint32_t wgX,
+		                    const char* label,
+		                    const WGPUPassTimestampWrites* tw = nullptr) {
 			WGPUComputePassDescriptor cpd{};
 			cpd.label = SV(label);
+			cpd.timestampWrites = tw;  // null when timestamps are disabled
 			WGPUComputePassEncoder cp = wgpuCommandEncoderBeginComputePass(encoder, &cpd);
 			wgpuComputePassEncoderSetPipeline(cp, pipe);
 			SetSortBG(cp, cfg);
@@ -422,9 +494,14 @@ namespace Engine {
 			wgpuComputePassEncoderRelease(cp);
 		};
 
-		Dispatch(m_PipeInit, kSortConfigInit, wgN, "gsplat-sort-init");
+		// First sort dispatch records "begin sort" timestamp; the very last
+		// dispatch (final scatter of byte-pass 3) records "end sort".
+		const auto* sortBeginTw = m_TimestampsEnabled ? &m_SortBeginTimestampWrites : nullptr;
+		const auto* sortEndTw   = m_TimestampsEnabled ? &m_SortEndTimestampWrites   : nullptr;
 
-		auto OnePass = [&](int cfg) {
+		Dispatch(m_PipeInit, kSortConfigInit, wgN, "gsplat-sort-init", sortBeginTw);
+
+		auto OnePass = [&](int cfg, bool isLast) {
 			// Stable workgroup-local radix:
 			//   1) clear per-workgroup histogram (numWg * 256 entries)
 			//   2) per-workgroup count (parallel)
@@ -437,14 +514,113 @@ namespace Engine {
 			Dispatch(m_PipeWgHist,          cfg, wgN,     "gsplat-sort-wghist");
 			Dispatch(m_PipeColumnScan,      cfg, 256,     "gsplat-sort-col-scan");
 			Dispatch(m_PipeDigitOffsetScan, cfg, 1,       "gsplat-sort-digit-scan");
-			Dispatch(m_PipeStableScatter,   cfg, wgN,     "gsplat-sort-stable-scatter");
+			Dispatch(m_PipeStableScatter,   cfg, wgN,     "gsplat-sort-stable-scatter",
+			         isLast ? sortEndTw : nullptr);
 		};
-		OnePass(kSortConfigPass0);
-		OnePass(kSortConfigPass1);
-		OnePass(kSortConfigPass2);
-		OnePass(kSortConfigPass3);
+		OnePass(kSortConfigPass0, false);
+		OnePass(kSortConfigPass1, false);
+		OnePass(kSortConfigPass2, false);
+		OnePass(kSortConfigPass3, true);
 
 		m_FinalIsPing = true;  // 4 swaps -> back to IdxPing
+	}
+
+
+	void GaussianSplatRenderer::ResolveAndReadTimestamps(WGPUCommandEncoder encoder)
+	{
+		if (!m_TimestampsEnabled || m_Count == 0) return;
+
+		// Resolve all 4 query slots to the GPU-only resolve buffer, then
+		// copy into the next ring slot's MAP_READ buffer. mapAsync is
+		// initiated AFTER the queue submit (caller does that via the next
+		// frame's tick path) — here we only schedule GPU work.
+		TsSlot& slot = m_TsRing[m_TsRingNext];
+		if (slot.resolved || slot.mappingPending) {
+			// Ring full — caller is producing frames faster than the map
+			// callbacks resolve. Skip writing this frame's data; the
+			// metric just shows the previous sample.
+			return;
+		}
+
+		wgpuCommandEncoderResolveQuerySet(
+			encoder, m_QuerySet, 0, 4, m_TsResolveBuf, 0);
+		wgpuCommandEncoderCopyBufferToBuffer(
+			encoder, m_TsResolveBuf, 0,
+			slot.mapBuf, 0, 4u * sizeof(uint64_t));
+
+		slot.resolved   = true;
+		m_TsRingNext = (m_TsRingNext + 1) % kTsRingSize;
+	}
+
+
+	// ---- Async timestamp readback -----------------------------------------
+	namespace {
+		// Heap-allocated trampoline so the map callback knows which slot to
+		// read and which renderer to push samples into. Freed inside the
+		// callback. Necessary because WGPUBufferMapCallbackInfo only takes
+		// raw void*'s; capturing a closure is out.
+		struct MapTramp
+		{
+			GaussianSplatRenderer*               self;
+			GaussianSplatRenderer::TsSlot*       slot;
+		};
+
+		void OnTimestampsMapped(WGPUMapAsyncStatus status,
+		                        WGPUStringView /*msg*/,
+		                        void* u1, void* /*u2*/)
+		{
+			MapTramp* t = static_cast<MapTramp*>(u1);
+			if (!t) return;
+			if (status == WGPUMapAsyncStatus_Success && t->slot && t->slot->mapBuf) {
+				const uint64_t* ts =
+					static_cast<const uint64_t*>(
+						wgpuBufferGetConstMappedRange(t->slot->mapBuf, 0, 4u * sizeof(uint64_t)));
+				if (ts) {
+					// ts[0..3] = sortBegin, sortEnd, renderBegin, renderEnd in ns.
+					// Guard against the rare 'unwritten' case where a slot
+					// reads back zero (shouldn't happen, but cheap to test).
+					if (ts[1] > ts[0] && ts[3] > ts[2]) {
+						const double sortNs   = double(ts[1] - ts[0]);
+						const double renderNs = double(ts[3] - ts[2]);
+						auto& m = t->self->Metrics();
+						m.gpuSortMs.Push(  float(sortNs   / 1.0e6));
+						m.gpuRenderMs.Push(float(renderNs / 1.0e6));
+						m.gpuTotalMs.Push( float((sortNs + renderNs) / 1.0e6));
+					}
+				}
+				wgpuBufferUnmap(t->slot->mapBuf);
+			}
+			if (t->slot) {
+				t->slot->resolved = false;
+				t->slot->mappingPending = false;
+			}
+			delete t;
+		}
+	}
+
+
+	void GaussianSplatRenderer::TickPerf()
+	{
+		// Forward any already-mapped readback slots into the metrics ring
+		// (mapAsync callbacks fire from the JS event loop / Dawn process
+		// events outside our control), and kick off mapAsync on any newly
+		// resolved-but-not-yet-mapping slot so the next frame can pick up
+		// the data once GPU is done.
+		if (!m_TimestampsEnabled) return;
+
+		for (int i = 0; i < kTsRingSize; ++i) {
+			TsSlot& s = m_TsRing[i];
+			if (s.resolved && !s.mappingPending) {
+				s.mappingPending = true;
+				MapTramp* t = new MapTramp{ this, &s };
+				WGPUBufferMapCallbackInfo cbi{};
+				cbi.mode      = WGPUCallbackMode_AllowSpontaneous;
+				cbi.callback  = OnTimestampsMapped;
+				cbi.userdata1 = t;
+				(void)wgpuBufferMapAsync(s.mapBuf, WGPUMapMode_Read, 0,
+				                         4u * sizeof(uint64_t), cbi);
+			}
+		}
 	}
 
 
@@ -490,6 +666,8 @@ namespace Engine {
 		if (m_RenderBGL)  { wgpuBindGroupLayoutRelease(m_RenderBGL);    m_RenderBGL  = nullptr; }
 		if (m_SortPL)     { wgpuPipelineLayoutRelease(m_SortPL);        m_SortPL     = nullptr; }
 		if (m_RenderPL)   { wgpuPipelineLayoutRelease(m_RenderPL);      m_RenderPL   = nullptr; }
+
+		DestroyTimestampResources();
 	}
 
 }

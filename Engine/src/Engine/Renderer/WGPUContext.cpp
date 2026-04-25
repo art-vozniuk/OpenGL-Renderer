@@ -128,6 +128,21 @@ namespace Engine {
 		WGPUDeviceDescriptor dDesc{};
 		dDesc.label = SV("engine-device");
 
+		// Optional features. timestamp-query is only present on a subset
+		// of (browser × OS × driver) combos — we ask for it but tolerate
+		// failure. The renderer's perf overlay falls back to CPU-only
+		// timings when this isn't granted.
+		WGPUFeatureName optionalFeatures[1] = { WGPUFeatureName_TimestampQuery };
+		const bool adapterHasTimestamp =
+			wgpuAdapterHasFeature(m_Adapter, WGPUFeatureName_TimestampQuery) != 0;
+		if (adapterHasTimestamp) {
+			dDesc.requiredFeatures      = optionalFeatures;
+			dDesc.requiredFeatureCount  = 1;
+		}
+		m_HasTimestampQueries = adapterHasTimestamp;
+		INFO_CORE("WGPU timestamp-query feature: {0}",
+		          adapterHasTimestamp ? "available" : "not available");
+
 		WGPUDeviceLostCallbackInfo lostCb{};
 		lostCb.mode     = WGPUCallbackMode_AllowProcessEvents;
 		lostCb.callback = OnDeviceLost;
@@ -265,7 +280,8 @@ namespace Engine {
 
 
 	WGPURenderPassEncoder WGPUContext::OpenColorPass(const Frame& frame,
-	                                                  float r, float g, float b, float a)
+	                                                  float r, float g, float b, float a,
+	                                                  const WGPUPassTimestampWrites* timestampWrites)
 	{
 		WGPURenderPassColorAttachment color{};
 		color.view       = frame.view;
@@ -278,6 +294,10 @@ namespace Engine {
 		rpDesc.label                = SV("color-pass");
 		rpDesc.colorAttachmentCount = 1;
 		rpDesc.colorAttachments     = &color;
+		// Optional: have the pass write timestamps to a query set on
+		// begin / end. Used by the perf overlay; nullptr when timestamp
+		// queries aren't available on this device.
+		rpDesc.timestampWrites      = timestampWrites;
 
 		return wgpuCommandEncoderBeginRenderPass(frame.encoder, &rpDesc);
 	}

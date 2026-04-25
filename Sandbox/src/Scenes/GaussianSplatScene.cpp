@@ -206,6 +206,20 @@ namespace Sandbox {
 	{
 		m_Camera.Update(ts);
 
+		// Frame-interval sample (CPU wallclock between scene tick starts).
+		// Captured before any encoding work so it reflects the user-visible
+		// rate, not just our sort/render budget.
+		const double frameStart = glfwGetTime();
+		if (m_Splats && m_PrevFrameStart > 0.0) {
+			m_Splats->Metrics().frameMs.Push(
+				static_cast<float>((frameStart - m_PrevFrameStart) * 1000.0));
+		}
+		m_PrevFrameStart = frameStart;
+
+		// Drain async timestamp readbacks from previous frames into the
+		// metrics ring before we schedule the next round.
+		if (m_Splats) m_Splats->TickPerf();
+
 		if (!Renderer::BeginScene(m_Camera.GetRenderCamera())) {
 			return;
 		}
@@ -215,14 +229,36 @@ namespace Sandbox {
 		// pass is active). The renderer reads only `sortedIndices` so
 		// re-sorting is just one buffer rewrite, not the bulk reshuffle
 		// the GL renderer used to do.
+		const double encodeStart = glfwGetTime();
 		const glm::mat4& view = m_Camera.GetRenderCamera()->GetViewMatrix();
 		if (m_Splats) m_Splats->EncodeSort(Renderer::Encoder(), view);
 
-		Renderer::OpenColorPass(0.05f, 0.05f, 0.08f, 1.0f);
+		const WGPUPassTimestampWrites* renderTw =
+			m_Splats ? m_Splats->GetRenderPassTimestampWrites() : nullptr;
+		Renderer::OpenColorPass(0.05f, 0.05f, 0.08f, 1.0f, renderTw);
 		if (m_Splats) {
 			m_Splats->EncodeRender(Renderer::CurrentPass(),
 			                       m_Camera.GetRenderCamera(),
 			                       glm::vec2(m_ScreenWidth, m_ScreenHeight));
+		}
+
+		// The render pass writes its end-of-pass timestamp on close, so we
+		// have to close it BEFORE running ResolveAndReadTimestamps —
+		// otherwise the encoder is still locked by the open pass and the
+		// resolve call errors out.
+		Renderer::ClosePass();
+
+		// Resolve the four timestamp queries into the next ring slot. Has
+		// to happen while the encoder is still open and BEFORE the swap
+		// (Renderer::EndScene closes the pass and submits).
+		if (m_Splats) m_Splats->ResolveAndReadTimestamps(Renderer::Encoder());
+
+		const double encodeEnd = glfwGetTime();
+		if (m_Splats) {
+			m_Splats->Metrics().cpuEncodeMs.Push(
+				static_cast<float>((encodeEnd - encodeStart) * 1000.0));
+			m_Splats->Metrics().splatCount = static_cast<int>(m_SplatCount);
+			m_Splats->Metrics().Emit();
 		}
 
 		// Roll a 60-frame FPS counter and print every 60 frames so we can

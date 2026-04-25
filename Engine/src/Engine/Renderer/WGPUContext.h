@@ -55,6 +55,11 @@ namespace Engine {
 		uint32_t          Width()         const { return m_Width; }
 		uint32_t          Height()        const { return m_Height; }
 
+		// True if the active device has the timestamp-query feature
+		// granted. Used by the perf overlay to decide whether to emit
+		// GPU-side timings or fall back to CPU encode time only.
+		bool              HasTimestampQueries() const { return m_HasTimestampQueries; }
+
 		// Per-frame swap-chain handle. `valid == false` means "skip render
 		// this frame" (surface was lost, resize pending, etc.).
 		struct Frame
@@ -70,9 +75,12 @@ namespace Engine {
 
 		// Convenience: open a render pass that clears the swap-chain view.
 		// The caller still owns the lifetime — call ClosePass() before
-		// EndFrame.
+		// EndFrame. Optional `timestampWrites` makes the pass record GPU
+		// timestamps (used by the gsplat perf overlay); pass nullptr when
+		// not measuring.
 		WGPURenderPassEncoder OpenColorPass(const Frame& frame,
-		                                    float r, float g, float b, float a);
+		                                    float r, float g, float b, float a,
+		                                    const WGPUPassTimestampWrites* timestampWrites = nullptr);
 		void                  ClosePass(WGPURenderPassEncoder pass);
 
 	private:
@@ -84,6 +92,7 @@ namespace Engine {
 		WGPUTextureFormat m_SurfaceFormat = WGPUTextureFormat_Undefined;
 		uint32_t          m_Width         = 0;
 		uint32_t          m_Height        = 0;
+		bool              m_HasTimestampQueries = false;
 	};
 
 }

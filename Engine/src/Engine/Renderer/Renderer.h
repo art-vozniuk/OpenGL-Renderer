@@ -42,7 +42,13 @@ namespace Engine {
 		// resize) — caller should skip render + still call EndScene to
 		// release the slot.
 		static bool BeginScene(const SPtr<Camera>& camera);
-		static void OpenColorPass(float r = 0.05f, float g = 0.05f, float b = 0.08f, float a = 1.0f);
+		static void OpenColorPass(float r = 0.05f, float g = 0.05f, float b = 0.08f, float a = 1.0f,
+		                          const WGPUPassTimestampWrites* timestampWrites = nullptr);
+		// Close the active render pass so the caller can issue more
+		// non-pass encoder commands (e.g. resolve query sets) before
+		// EndScene finishes + submits the encoder. EndScene also closes
+		// the pass if still open, so calling this is optional.
+		static void ClosePass();
 		static void EndScene();
 
 		// Active resources for use inside a BeginScene/EndScene pair.
