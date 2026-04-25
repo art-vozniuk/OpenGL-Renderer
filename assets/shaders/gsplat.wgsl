@@ -154,6 +154,23 @@ fn vs_main(
         return out;
     }
 
+    // Frustum cull at the splat centre with a screen-space-radius margin.
+    // For a 1M-splat scene with the camera looking at a small region most
+    // splats end up off-screen — skipping their quads here saves the
+    // fragment shader + alpha-blend overdraw they would otherwise cause.
+    // Conservative: test the bounding circle of the splat (radius =
+    // max(major, minor) in pixels) against the viewport edges in clip
+    // space. The existing 'too big' and 'behind camera' checks above
+    // cover the other cases where the projected bound would be wrong.
+    let centerClip = u.projection * viewPosH;
+    let radiusPx   = max(majorRadius, minorRadius);
+    let marginClip = (2.0 * radiusPx / u.viewportSize) * centerClip.w;
+    if (abs(centerClip.x) > centerClip.w + marginClip.x
+     || abs(centerClip.y) > centerClip.w + marginClip.y) {
+        out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
+    }
+
     let majorAxis = eig.majorAxis;
     let minorAxis = vec2<f32>(-majorAxis.y, majorAxis.x);
     let offsetPx = majorAxis * (corner.x * majorRadius)
