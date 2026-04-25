@@ -44,7 +44,7 @@ Sandbox/src/
 
 ## Requirements
 
-- CMake 3.25+, C++17 compiler
+- CMake 3.25+, C++23 compiler
 - macOS native: Xcode / AppleClang
 - Web: [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html)
 - WebGPU-capable browser (Chrome 113+, Safari 18+, Firefox 141+)
