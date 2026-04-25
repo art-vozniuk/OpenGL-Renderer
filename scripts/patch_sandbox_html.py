@@ -264,34 +264,51 @@ SCRIPT_PATCH = """<script>
   // sensitivity in FlyCamera.
   var LOOK_SPEED = 1.5; // degrees per (frame · stick magnitude)
 
+  // Don't ccall before the wasm runtime has bound its function table —
+  // emscripten installs assertion-shim exports that ABORT THE RUNTIME
+  // when called pre-init ("call to '_vinput_set_move' via reference
+  // taken before Wasm module initialization"). The abort happens
+  // inside assert() before any try/catch can run.
+  //
+  // Module.calledRun flips true after callMain returns / unwinds. With
+  // our flow that's after scene fetch + emscripten_set_main_loop's
+  // simulate-infinite-loop unwind. By then every wasm export is real.
+  // (The parent's loading overlay covers the iframe until splat-ready,
+  // so the user can't touch the joysticks before the gate opens
+  // anyway.)
+  var wasmReady = false;
+  function isReady() {
+    if (wasmReady) return true;
+    if (typeof Module !== 'undefined' && Module.calledRun === true) {
+      wasmReady = true;
+      return true;
+    }
+    return false;
+  }
+
   function tick() {
     requestAnimationFrame(tick);
-    if (typeof Module === 'undefined' || typeof Module.ccall !== 'function') return;
-    try {
-      // Left stick: x = strafe, y (screen-up) = forward. Invert y so
-      // pushing the knob up moves the camera forward (away from viewer).
+    if (!isReady()) return;
+    // Left stick: x = strafe, y (screen-up) = forward. Invert y so
+    // pushing the knob up moves the camera forward (away from viewer).
+    Module.ccall(
+      'vinput_set_move',
+      null,
+      ['number', 'number', 'number'],
+      [leftStick.value.x, verticalAxis, -leftStick.value.y]
+    );
+    // Right stick: yaw / pitch deltas. Multiply by frame magnitude so
+    // a held knob keeps rotating the camera, and invert pitch so down
+    // on the stick = look down (matches mouse drag convention).
+    var yawDelta   = rightStick.value.x * LOOK_SPEED;
+    var pitchDelta = -rightStick.value.y * LOOK_SPEED;
+    if (yawDelta !== 0 || pitchDelta !== 0) {
       Module.ccall(
-        'vinput_set_move',
+        'vinput_apply_look',
         null,
-        ['number', 'number', 'number'],
-        [leftStick.value.x, verticalAxis, -leftStick.value.y]
+        ['number', 'number'],
+        [yawDelta, pitchDelta]
       );
-      // Right stick: yaw / pitch deltas. Multiply by frame magnitude so
-      // a held knob keeps rotating the camera, and invert pitch so down
-      // on the stick = look down (matches mouse drag convention).
-      var yawDelta   = rightStick.value.x * LOOK_SPEED;
-      var pitchDelta = -rightStick.value.y * LOOK_SPEED;
-      if (yawDelta !== 0 || pitchDelta !== 0) {
-        Module.ccall(
-          'vinput_apply_look',
-          null,
-          ['number', 'number'],
-          [yawDelta, pitchDelta]
-        );
-      }
-    } catch (err) {
-      // Module not yet ready, or ccall not in EXPORTED_RUNTIME_METHODS.
-      // Either way, swallow — next frame retries.
     }
   }
   requestAnimationFrame(tick);
