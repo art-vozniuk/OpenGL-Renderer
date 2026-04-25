@@ -126,18 +126,25 @@ namespace Engine {
 			return;
 		}
 
-		// 4 slots: sort-begin / sort-end / render-begin / render-end.
+		// 6 slots, three (begin,end) pairs on three passes:
+		//   [0,1] = init_depth pass            (sort *begin*)
+		//   [2,3] = final byte-pass scatter    (sort *end*)
+		//   [4,5] = render pass                (render *begin*+*end*)
+		// We use pair-on-each-pass instead of "begin only" / "end only"
+		// because Chrome / emdawnwebgpu rejects WGPU_QUERY_SET_INDEX_UNDEFINED
+		// (UINT32_MAX) on the JS validator path even though Dawn-native
+		// accepts it. All paired indices are valid `< count`.
 		WGPUQuerySetDescriptor qd{};
 		qd.label = SV("gsplat-perf-querySet");
 		qd.type  = WGPUQueryType_Timestamp;
-		qd.count = 4;
+		qd.count = 6;
 		m_QuerySet = wgpuDeviceCreateQuerySet(m_Ctx->Device(), &qd);
 
 		// Resolve buffer is GPU-only (target of ResolveQuerySet).
 		WGPUBufferDescriptor rd{};
 		rd.label = SV("gsplat-perf-resolveBuf");
 		rd.usage = WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc;
-		rd.size  = 4u * sizeof(uint64_t);
+		rd.size  = 6u * sizeof(uint64_t);
 		m_TsResolveBuf = wgpuDeviceCreateBuffer(m_Ctx->Device(), &rd);
 
 		// Mappable readback ring. Each slot is filled by CopyBufferToBuffer
@@ -147,7 +154,7 @@ namespace Engine {
 			WGPUBufferDescriptor md{};
 			md.label = SV("gsplat-perf-mapBuf");
 			md.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
-			md.size  = 4u * sizeof(uint64_t);
+			md.size  = 6u * sizeof(uint64_t);
 			m_TsRing[i].mapBuf = wgpuDeviceCreateBuffer(m_Ctx->Device(), &md);
 		}
 
@@ -157,17 +164,17 @@ namespace Engine {
 		// lifetime.
 		m_SortBeginTimestampWrites.querySet                  = m_QuerySet;
 		m_SortBeginTimestampWrites.beginningOfPassWriteIndex = 0;
-		m_SortBeginTimestampWrites.endOfPassWriteIndex       = WGPU_QUERY_SET_INDEX_UNDEFINED;
+		m_SortBeginTimestampWrites.endOfPassWriteIndex       = 1;
 
 		m_SortEndTimestampWrites.querySet                    = m_QuerySet;
-		m_SortEndTimestampWrites.beginningOfPassWriteIndex   = WGPU_QUERY_SET_INDEX_UNDEFINED;
-		m_SortEndTimestampWrites.endOfPassWriteIndex         = 1;
+		m_SortEndTimestampWrites.beginningOfPassWriteIndex   = 2;
+		m_SortEndTimestampWrites.endOfPassWriteIndex         = 3;
 
 		m_RenderTimestampWrites.querySet                     = m_QuerySet;
-		m_RenderTimestampWrites.beginningOfPassWriteIndex    = 2;
-		m_RenderTimestampWrites.endOfPassWriteIndex          = 3;
+		m_RenderTimestampWrites.beginningOfPassWriteIndex    = 4;
+		m_RenderTimestampWrites.endOfPassWriteIndex          = 5;
 
-		INFO_CORE("gsplat: GPU timestamp queries enabled (4 slots, 3-deep readback ring)");
+		INFO_CORE("gsplat: GPU timestamp queries enabled (6 slots, 3-deep readback ring)");
 	}
 
 
@@ -543,10 +550,10 @@ namespace Engine {
 		}
 
 		wgpuCommandEncoderResolveQuerySet(
-			encoder, m_QuerySet, 0, 4, m_TsResolveBuf, 0);
+			encoder, m_QuerySet, 0, 6, m_TsResolveBuf, 0);
 		wgpuCommandEncoderCopyBufferToBuffer(
 			encoder, m_TsResolveBuf, 0,
-			slot.mapBuf, 0, 4u * sizeof(uint64_t));
+			slot.mapBuf, 0, 6u * sizeof(uint64_t));
 
 		slot.resolved   = true;
 		m_TsRingNext = (m_TsRingNext + 1) % kTsRingSize;
@@ -574,14 +581,16 @@ namespace Engine {
 			if (status == WGPUMapAsyncStatus_Success && t->slot && t->slot->mapBuf) {
 				const uint64_t* ts =
 					static_cast<const uint64_t*>(
-						wgpuBufferGetConstMappedRange(t->slot->mapBuf, 0, 4u * sizeof(uint64_t)));
+						wgpuBufferGetConstMappedRange(t->slot->mapBuf, 0, 6u * sizeof(uint64_t)));
 				if (ts) {
-					// ts[0..3] = sortBegin, sortEnd, renderBegin, renderEnd in ns.
-					// Guard against the rare 'unwritten' case where a slot
-					// reads back zero (shouldn't happen, but cheap to test).
-					if (ts[1] > ts[0] && ts[3] > ts[2]) {
-						const double sortNs   = double(ts[1] - ts[0]);
-						const double renderNs = double(ts[3] - ts[2]);
+					// ts[0..5] layout (each pair = one pass's begin / end):
+					//   0,1 = init_depth        (start of sort)
+					//   2,3 = final scatter     (end of sort)
+					//   4,5 = render pass
+					// sort_total spans the whole sort: ts[3] - ts[0].
+					if (ts[3] > ts[0] && ts[5] > ts[4]) {
+						const double sortNs   = double(ts[3] - ts[0]);
+						const double renderNs = double(ts[5] - ts[4]);
 						auto& m = t->self->Metrics();
 						m.gpuSortMs.Push(  float(sortNs   / 1.0e6));
 						m.gpuRenderMs.Push(float(renderNs / 1.0e6));
@@ -618,7 +627,7 @@ namespace Engine {
 				cbi.callback  = OnTimestampsMapped;
 				cbi.userdata1 = t;
 				(void)wgpuBufferMapAsync(s.mapBuf, WGPUMapMode_Read, 0,
-				                         4u * sizeof(uint64_t), cbi);
+				                         6u * sizeof(uint64_t), cbi);
 			}
 		}
 	}
