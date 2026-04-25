@@ -33,8 +33,8 @@ namespace Sandbox {
 		// Creates a scene by id. Returns nullptr if no matching factory.
 		SceneBase* Create(const std::string& id, float screenWidth, float screenHeight) const;
 
-		// Returns the preferred default (currently "sponza"), used as fallback
-		// when no id is provided or when the requested id is unknown.
+		// Default scene id — used when no id is supplied or the requested
+		// id is unknown.
 		std::string DefaultId() const { return m_DefaultId; }
 		void SetDefaultId(const std::string& id) { m_DefaultId = id; }
 
@@ -46,8 +46,6 @@ namespace Sandbox {
 
 		std::unordered_map<std::string, Factory> m_Factories;
 		std::vector<std::string> m_Ids;
-		// gsplat (train.splat, antimatter15 format) is the only scene that
-		// has been ported to WebGPU. Sponza + gsplat_hq removed for now.
 		std::string m_DefaultId = "gsplat";
 	};
 
@@ -56,14 +54,14 @@ namespace Sandbox {
 
 /*
  * SCENE_REGISTER
- * --------------
- * Helper macro for static-time registration. Invoke *inside* the Sandbox
- * namespace (so the unqualified class name works with ## token-pasting) and
- * pass the scene class + its stable id.
+ *
+ * Helper macro for static-init-time scene registration. Invoke inside
+ * the Sandbox namespace (so the unqualified class name works with the
+ * ## token-pasting) and pass the scene class plus its stable id.
  * Example:
  *     namespace Sandbox {
- *         // class definition...
- *         SCENE_REGISTER("sponza", SponzaScene)
+ *         class GaussianSplatScene final : public SceneBase { ... };
+ *         SCENE_REGISTER("gsplat", GaussianSplatScene)
  *     }
  */
 #define SCENE_REGISTER(id_str, SceneClass)                                            \

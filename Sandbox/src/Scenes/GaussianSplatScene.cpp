@@ -115,13 +115,6 @@ namespace Sandbox {
 		Renderer::EndScene();
 	}
 
-
-	void GaussianSplatScene::OnImGuiRender()
-	{
-		// ImGui is disabled on the WebGPU branch -- panel will reappear once
-		// imgui_impl_wgpu is integrated.
-	}
-
 	SCENE_REGISTER("gsplat", GaussianSplatScene)
 
 }

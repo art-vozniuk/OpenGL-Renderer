@@ -6,16 +6,15 @@ namespace Sandbox {
 
 	/*
 	 * SceneBase
-	 * ---------
-	 * Thin wrapper over Engine::Layer that fixes the contract used by all
-	 * application-level "scenes" in the Sandbox:
-	 *   - Constructor receives the current framebuffer size so the scene
-	 *     can set up its camera / render targets immediately.
-	 *   - Name() is the stable identifier used in the scene registry and
-	 *     in URL / CLI selectors (e.g. "sponza", "bicycle").
 	 *
-	 * Scenes still participate in the normal Layer lifecycle: OnAttach /
-	 * OnUpdate / OnEvent / OnImGuiRender / OnDetach.
+	 * Thin wrapper over Engine::Layer used by all Sandbox scenes:
+	 *  - Constructor takes the current framebuffer size so the scene can
+	 *    set up its camera + per-frame buffers immediately.
+	 *  - Id() is the stable identifier used in the scene registry and
+	 *    in URL / CLI selectors (e.g. "gsplat").
+	 *
+	 * Scenes participate in the normal Layer lifecycle (OnAttach /
+	 * OnUpdate / OnEvent / OnDetach).
 	 */
 	class SceneBase : public Engine::Layer
 	{

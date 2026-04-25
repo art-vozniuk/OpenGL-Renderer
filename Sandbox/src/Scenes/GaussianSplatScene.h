@@ -11,10 +11,10 @@ namespace Sandbox {
 
 	/*
 	 * GaussianSplatScene
-	 * ------------------
-	 * Renders a single static Gaussian-splat scene loaded from an
-	 * antimatter15-format .splat file. Phase 1 milestone — no streaming,
-	 * no CPU sort yet (alpha blend artifacts are expected on this pass).
+	 *
+	 * Single-asset scene: loads an antimatter15 .splat file and drives
+	 * the GS renderer (per-frame GPU sort + indirected draw). Camera is
+	 * a simple WASD fly camera.
 	 */
 	class GaussianSplatScene final : public SceneBase
 	{
@@ -22,7 +22,6 @@ namespace Sandbox {
 		GaussianSplatScene(float screenWidth, float screenHeight);
 
 		void OnUpdate(Engine::Timestep ts) override;
-		void OnImGuiRender() override;
 
 	private:
 		Engine::FlyCamera m_Camera;
