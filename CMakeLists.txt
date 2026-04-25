@@ -215,6 +215,10 @@ if(RENDERER_BUILD_SANDBOX)
             -sSTACK_SIZE=5242880          # 5 MB
             --preload-file ${ASSETS_DIR}@/assets
             -sEXPORTED_RUNTIME_METHODS=cwrap,ccall
+            # JS bridge for the on-screen mobile joysticks: vinput_set_move
+            # holds the left-stick vector + Q/E buttons; vinput_apply_look
+            # accumulates right-stick swipe deltas.
+            -sEXPORTED_FUNCTIONS=_main,_vinput_set_move,_vinput_apply_look
             -sASSERTIONS=1
         )
         target_compile_options(Sandbox PRIVATE
