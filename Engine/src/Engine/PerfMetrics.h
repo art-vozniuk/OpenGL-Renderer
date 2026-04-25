@@ -54,25 +54,6 @@ namespace Engine {
 			for (int i = 1; i < count; ++i) if (buf[i] > m) m = buf[i];
 			return m;
 		}
-
-		// Average over the most-recent samples whose total duration sums
-		// to at least `windowMs`. Adapts naturally to current frame rate
-		// — at 60 fps it's ~60 samples, at 11 fps it's ~11. Used to drive
-		// the "1-second avg fps" display in the perf overlay.
-		float AvgRecentMs(float windowMs) const
-		{
-			if (count == 0) return 0.0f;
-			float sum  = 0.0f;
-			int   used = 0;
-			int   idx  = (head + kCapacity - 1) % kCapacity;
-			for (int i = 0; i < count; ++i) {
-				sum += buf[idx];
-				++used;
-				if (sum >= windowMs) break;
-				idx = (idx + kCapacity - 1) % kCapacity;
-			}
-			return used > 0 ? sum / static_cast<float>(used) : 0.0f;
-		}
 	};
 
 
@@ -99,18 +80,17 @@ namespace Engine {
 		void Emit() const
 		{
 		#ifdef __EMSCRIPTEN__
-			char buf[720];
+			char buf[640];
 			std::snprintf(
 				buf, sizeof(buf),
 				"{\"type\":\"perf\","
-				"\"frame\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f,\"avg1s\":%.2f},"
+				"\"frame\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f},"
 				"\"cpuEncode\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f},"
 				"\"gpuSort\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f},"
 				"\"gpuRender\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f},"
 				"\"gpuTotal\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f},"
 				"\"splats\":%d,\"gpuValid\":%s}",
 				frameMs.Current(),     frameMs.Avg(),     frameMs.Max(),
-				frameMs.AvgRecentMs(1000.0f),
 				cpuEncodeMs.Current(), cpuEncodeMs.Avg(), cpuEncodeMs.Max(),
 				gpuSortMs.Current(),   gpuSortMs.Avg(),   gpuSortMs.Max(),
 				gpuRenderMs.Current(), gpuRenderMs.Avg(), gpuRenderMs.Max(),
