@@ -1,10 +1,12 @@
-// Gaussian-splat WGSL shader, WebGPU port of the original GLSL pair.
-// One file with @vertex + @fragment entry points, included verbatim from
-// disk by the renderer. Math conventions match Kerbl et al. 2023:
-//   - per-splat covariance Sigma_3D = R * S^2 * R^T
-//   - 2D screen-space cov via EWA-style first-order Jacobian
-//   - 3-sigma-radius quad bounding the projected ellipse
-//   - alpha-over blend with premultiplied RGB
+// Gaussian-splat WGSL render shader, indexed-storage variant.
+//
+// Splat data lives in five storage buffers (positions, scales, rotations,
+// colors, sortedIndices). The `corners` array is a module constant — we
+// don't need a vertex buffer for that. Per draw the pipeline emits 6
+// vertices x N instances; the vertex shader uses
+//   instance_index -> sortedIndices -> raw splat data
+// so changing draw order is just rewriting one buffer (sortedIndices)
+// from the GPU sort, never touching the bulky position/scale/etc data.
 
 struct Uniforms {
     view:         mat4x4<f32>,
@@ -14,20 +16,34 @@ struct Uniforms {
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(1) var<storage, read> positions:     array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> scales:        array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> rotations:     array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> colors:        array<u32>;        // packed u8x4
+@group(0) @binding(5) var<storage, read> sortedIndices: array<u32>;
 
 struct VsOut {
     @builtin(position) pos:      vec4<f32>,
     @location(0)       color:    vec4<f32>,
-    // Vertex-local 2D offset in sigma units (= corner * 3.0). The fragment
-    // shader uses |localPos|^2 as the Mahalanobis distance squared.
+    // Vertex-local 2D offset in sigma units (= corner * 3.0). |localPos|^2
+    // is the Mahalanobis distance squared seen by the fragment shader.
     @location(1)       localPos: vec2<f32>,
 };
+
+// Two triangles per quad: 0,1,2 + 0,2,3 with corners in [-1, 1]^2.
+const CORNERS: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 1.0, -1.0),
+    vec2<f32>( 1.0,  1.0),
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 1.0,  1.0),
+    vec2<f32>(-1.0,  1.0),
+);
 
 // ----- Helpers (covariance + eigen) -----------------------------------------
 
 fn QuatToMat3(q: vec4<f32>) -> mat3x3<f32> {
-    // Quaternion convention: q.x = w, q.y = x, q.z = y, q.w = z (matches
-    // SplatLoader's vec4(w, x, y, z) layout).
+    // Convention: q.x=w, q.y=x, q.z=y, q.w=z (matches SplatLoader).
     let w = q.x;
     let x = q.y;
     let y = q.z;
@@ -66,7 +82,6 @@ fn Cov2D(viewPos: vec3<f32>, cov3D: mat3x3<f32>, viewRot: mat3x3<f32>,
     );
     let T   = J * viewRot;
     let cov = T * cov3D * transpose(T);
-    // 0.3 px low-pass on the diagonal — matches reference impl.
     return vec3<f32>(cov[0][0] + 0.3, cov[0][1], cov[1][1] + 0.3);
 }
 
@@ -100,12 +115,17 @@ fn EvalEigen(cov: vec3<f32>) -> SplatEigen {
 
 @vertex
 fn vs_main(
-    @location(0) corner:  vec2<f32>,
-    @location(1) splatPos: vec3<f32>,
-    @location(2) splatScale: vec3<f32>,
-    @location(3) splatRot:   vec4<f32>,
-    @location(4) splatColor: vec4<f32>,
+    @builtin(vertex_index)   vid: u32,
+    @builtin(instance_index) iid: u32,
 ) -> VsOut {
+    let i      = sortedIndices[iid];
+    let corner = CORNERS[vid];
+    let p4     = positions[i];
+    let splatPos   = p4.xyz;
+    let splatScale = scales[i].xyz;
+    let splatRot   = rotations[i];
+    let splatColor = unpack4x8unorm(colors[i]);
+
     var out: VsOut;
     out.color = splatColor;
     out.localPos = vec2<f32>(0.0);
@@ -113,7 +133,6 @@ fn vs_main(
     let viewPosH = u.view * vec4<f32>(splatPos, 1.0);
     let viewPos  = viewPosH.xyz;
 
-    // Cull splats at / behind the near plane and absurdly large outliers.
     if (viewPos.z >= -0.05) {
         out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
@@ -161,7 +180,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (alpha < 1.0 / 255.0) {
         discard;
     }
-    // Premultiplied alpha out — pairs with blend factors
-    // src=One, dst=OneMinusSrcAlpha set in the pipeline.
     return vec4<f32>(in.color.rgb * alpha, alpha);
 }

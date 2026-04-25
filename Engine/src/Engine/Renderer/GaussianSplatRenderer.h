@@ -11,25 +11,24 @@
 namespace Engine {
 
 	/*
-	 * Stand-alone WebGPU renderer for a single Gaussian-splat scene.
+	 * WebGPU Gaussian-splat renderer with GPU sort.
 	 *
-	 * Owns:
-	 *   - one shared 6-index quad (4 corner verts + 6 indices)
-	 *   - four per-instance vertex buffers (SoA: positions, scales,
-	 *     rotations, colors)
-	 *   - a uniform buffer with view / projection / viewport
-	 *   - one render pipeline (alpha-over blend, no depth, instanced
-	 *     triangle-list draw of `m_Count` quads)
+	 * Pipeline (per frame):
 	 *
-	 * Per-frame the caller hands us an already-open WGPURenderPassEncoder
-	 * (the swap-chain colour pass) and we encode our draw into it. Set-up
-	 * and tear-down (clear, present) happen in the surrounding Renderer
-	 * code.
+	 *   1. cs_init_depth          — view-space depth as sortable u32 + identity perm
+	 *   2. for byte b in 0..3:
+	 *        cs_clear_hist        — zero histogram[256]
+	 *        cs_histogram         — atomicAdd histogram[digit]
+	 *        cs_prefix_sum        — exclusive scan -> offsets[256]
+	 *        cs_scatter           — atomicAdd offsets[digit] -> idxOut[dst] = idx
+	 *      (idxIn / idxOut alternate via the `swap` field of the sort uniform)
+	 *   3. render pass            — instance_index -> sortedIndices -> splat data
 	 *
-	 * This is the WebGPU port of the original GL renderer; the SH
-	 * (.ply view-dependent) path is temporarily disabled — only the
-	 * antimatter15 .splat flat-colour path is wired up here. Will be
-	 * brought back once the GS scene is solid.
+	 * Splat data lives in five storage buffers; only `sortedIndices` is
+	 * rewritten per frame. Compared to the GL renderer's "reshuffle 4
+	 * per-instance VBOs on every sort" design, we save ~80 MB of upload
+	 * bandwidth per re-sort at 2 M splats and unlock the per-frame budget
+	 * needed to drop the camera-stop-only sort throttle.
 	 */
 	class GaussianSplatRenderer
 	{
@@ -43,90 +42,70 @@ namespace Engine {
 		// Reload GPU buffers from a parsed splat dataset. Idempotent.
 		void Upload(const SplatData& data);
 
-		// Encode a draw into the active render pass.
-		// `pass` must be the pass opened by the renderer for this frame
-		// (cleared, no depth, sized to `viewportSize`). Updates the camera
-		// uniform buffer and issues the instanced draw.
-		void Render(WGPURenderPassEncoder pass,
-		            const SPtr<Camera>& camera,
-		            const glm::vec2& viewportSize);
+		// Encode the per-frame sort dispatches into `encoder`. Must run
+		// BEFORE OpenColorPass for the same frame (compute and render
+		// can't share an encoder once a render pass is open).
+		void EncodeSort(WGPUCommandEncoder encoder, const glm::mat4& viewMatrix);
+
+		// Encode the splat draw into `pass`. Must follow EncodeSort in the
+		// same frame so `sortedIndices` reflects the current view.
+		void EncodeRender(WGPURenderPassEncoder pass,
+		                  const SPtr<Camera>& camera,
+		                  const glm::vec2& viewportSize);
 
 		size_t SplatCount() const { return m_Count; }
 
-		// Force a back-to-front sort against the supplied view matrix.
-		// Used at scene-start so frame 0 is already sorted instead of
-		// rendering in file order until the next motion-stop.
-		void SortNow(const glm::mat4& viewMatrix) { Sort(viewMatrix); }
-
-		// Per-stage timing snapshot — same shape as the GL renderer's
-		// stats so the UI can display them once we re-enable ImGui.
-		struct PerfStats {
-			float sortMs      = 0.0f;
-			float reshuffleMs = 0.0f;
-			float uploadMs    = 0.0f;
-			float drawMs      = 0.0f;
-		};
-
-		PerfStats LastFrame() const { return m_LastFrame; }
-		PerfStats MaxLast5s() const;
-
 	private:
-		void CreateQuadGeometry();
-		void CreateInstanceBuffers();
 		void CreateUniformBuffer();
-		void CreatePipeline();
+		void CreateSortResources();
+		void CreatePipelines();
 		void DestroyGpuResources();
-
-		void Sort(const glm::mat4& viewMatrix);
-		bool NeedsResort(const glm::mat4& viewMatrix) const;
 
 		WGPUContext* m_Ctx = nullptr;
 
-		// Geometry: 4 corner verts, 6 indices per quad. Reused per instance.
-		WGPUBuffer m_QuadVerts = nullptr;
-		WGPUBuffer m_QuadIndices = nullptr;
+		// Storage buffers: read-only splat data (uploaded once).
+		WGPUBuffer m_Pos    = nullptr;   // vec4 (xyz padded)
+		WGPUBuffer m_Scale  = nullptr;   // vec4 (xyz padded)
+		WGPUBuffer m_Rot    = nullptr;   // vec4
+		WGPUBuffer m_Color  = nullptr;   // u32 packed (u8x4 normalised)
 
-		// Per-instance attributes.
-		WGPUBuffer m_PosBuf   = nullptr;
-		WGPUBuffer m_ScaleBuf = nullptr;
-		WGPUBuffer m_RotBuf   = nullptr;
-		WGPUBuffer m_ColorBuf = nullptr;
+		// Sort scratch (storage, rewritten every frame).
+		WGPUBuffer m_Depths   = nullptr; // array<u32, N>
+		WGPUBuffer m_IdxPing  = nullptr; // array<u32, N>
+		WGPUBuffer m_IdxPong  = nullptr; // array<u32, N>
+		WGPUBuffer m_Hist     = nullptr; // array<atomic<u32>, 256>
+		WGPUBuffer m_Offsets  = nullptr; // array<atomic<u32>, 256>
 
-		// Camera uniform: view, proj, viewport. Layout matches the WGSL
-		// `Uniforms` struct in `gsplat.wgsl`.
-		WGPUBuffer            m_UniformBuf  = nullptr;
-		WGPUBindGroupLayout   m_BindLayout  = nullptr;
-		WGPUBindGroup         m_BindGroup   = nullptr;
-		WGPUPipelineLayout    m_PipeLayout  = nullptr;
-		WGPURenderPipeline    m_Pipeline    = nullptr;
+		// Uniforms.
+		WGPUBuffer m_RenderUniform = nullptr;  // mat4 view, mat4 proj, vec2 viewport, vec2 pad
+		WGPUBuffer m_SortUniform   = nullptr;  // vec4 row2, u32 N, u32 shift, u32 swap, u32 pad
 
-		// CPU mirrors for the sort path.
-		std::vector<glm::vec3>   m_Positions;
-		std::vector<glm::vec3>   m_Scales;
-		std::vector<glm::vec4>   m_Rotations;
-		std::vector<glm::u8vec4> m_Colors;
+		// Layouts + groups.
+		WGPUBindGroupLayout m_SortBGL    = nullptr;
+		WGPUBindGroup       m_SortBG     = nullptr;
+		WGPUPipelineLayout  m_SortPL     = nullptr;
 
-		// Sort scratch.
-		std::vector<uint32_t>    m_SortIndices;
-		std::vector<uint32_t>    m_SortIndicesScratch;
-		std::vector<uint32_t>    m_SortKeys;
-		std::vector<uint32_t>    m_SortKeysScratch;
-		std::vector<glm::vec3>   m_ScratchVec3;
-		std::vector<glm::vec4>   m_ScratchVec4;
-		std::vector<glm::u8vec4> m_ScratchRgba;
-		std::vector<float>       m_Depths;
+		WGPUBindGroupLayout m_RenderBGL  = nullptr;
+		WGPUBindGroup       m_RenderBG   = nullptr;
+		WGPUPipelineLayout  m_RenderPL   = nullptr;
 
-		// Sort throttling state.
-		glm::mat4 m_LastSortView{1.0f};
-		bool      m_SortValid = false;
-		glm::mat4 m_LastObservedView{1.0f};
-		bool      m_WasMovingLastFrame = false;
+		// Compute pipelines (one per WGSL entry point).
+		WGPUComputePipeline m_PipeInit       = nullptr;
+		WGPUComputePipeline m_PipeClearHist  = nullptr;
+		WGPUComputePipeline m_PipeHistogram  = nullptr;
+		WGPUComputePipeline m_PipePrefixSum  = nullptr;
+		WGPUComputePipeline m_PipeScatter    = nullptr;
+
+		// Render pipeline.
+		WGPURenderPipeline  m_PipeRender     = nullptr;
+
+		// Track which idx buffer is "in" after the last sort pass, so the
+		// render bind group can use it as `sortedIndices`. After 4 passes
+		// it ends up in IdxPing again (4 swaps), but we keep the explicit
+		// state in case the count of passes changes.
+		bool m_FinalIsPing = true;
 
 		size_t m_Count = 0;
-
-		PerfStats              m_LastFrame;
-		std::vector<PerfStats> m_History;
-		size_t                 m_HistoryHead = 0;
 	};
 
 }

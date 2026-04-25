@@ -124,13 +124,17 @@ namespace Engine {
 	void Renderer::Init(WGPUContext* ctx)  { g.ctx = ctx; }
 	void Renderer::Shutdown()              { g = State{}; }
 
-	bool Renderer::BeginScene(const SPtr<Camera>& camera, float r, float gC, float b, float a)
+	bool Renderer::BeginScene(const SPtr<Camera>& camera)
 	{
 		g.camera = camera;
 		g.frame  = g.ctx->BeginFrame();
-		if (!g.frame.valid) return false;
+		return g.frame.valid;
+	}
+
+	void Renderer::OpenColorPass(float r, float gC, float b, float a)
+	{
+		if (!g.frame.valid || g.pass) return;
 		g.pass = g.ctx->OpenColorPass(g.frame, r, gC, b, a);
-		return true;
 	}
 
 	void Renderer::EndScene()
@@ -167,6 +171,7 @@ namespace Engine {
 	}
 
 	WGPUContext*          Renderer::Context()    { return g.ctx; }
+	WGPUCommandEncoder    Renderer::Encoder()    { return g.frame.encoder; }
 	WGPURenderPassEncoder Renderer::CurrentPass(){ return g.pass; }
 	const SPtr<Camera>&   Renderer::GetCamera()  { return g.camera; }
 

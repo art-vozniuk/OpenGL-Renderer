@@ -61,7 +61,6 @@ namespace Sandbox {
 
 		m_Splats = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
 		m_Splats->Upload(data);
-		m_Splats->SortNow(m_Camera.GetRenderCamera()->GetViewMatrix());
 	}
 
 
@@ -69,22 +68,26 @@ namespace Sandbox {
 	{
 		m_Camera.Update(ts);
 
-		// Open the colour pass with a deep grey so visible splats stand out.
-		if (!Renderer::BeginScene(m_Camera.GetRenderCamera(),
-		                          0.05f, 0.05f, 0.08f, 1.0f)) {
+		if (!Renderer::BeginScene(m_Camera.GetRenderCamera())) {
 			return;
 		}
 
+		// GPU sort runs every frame, BEFORE the colour pass is opened
+		// (compute and render passes can't share an encoder once a render
+		// pass is active). The renderer reads only `sortedIndices` so
+		// re-sorting is just one buffer rewrite, not the bulk reshuffle
+		// the GL renderer used to do.
+		const glm::mat4& view = m_Camera.GetRenderCamera()->GetViewMatrix();
+		if (m_Splats) m_Splats->EncodeSort(Renderer::Encoder(), view);
+
+		Renderer::OpenColorPass(0.05f, 0.05f, 0.08f, 1.0f);
 		if (m_Splats) {
-			m_Splats->Render(Renderer::CurrentPass(),
-			                 m_Camera.GetRenderCamera(),
-			                 glm::vec2(m_ScreenWidth, m_ScreenHeight));
+			m_Splats->EncodeRender(Renderer::CurrentPass(),
+			                       m_Camera.GetRenderCamera(),
+			                       glm::vec2(m_ScreenWidth, m_ScreenHeight));
 		}
 
-		// Headless screenshot hook. `GS_CAPTURE_PATH=/tmp/x.png ./Sandbox`
-		// triggers a single-frame capture on frame 30 (camera is steady
-		// and a sort has fired by then) and exits the app cleanly. Used
-		// by the dev / CI iteration loop.
+		// Headless screenshot hook (single-shot capture + exit).
 		++m_FrameCount;
 		if (m_FrameCount == 30) {
 			if (const char* p = std::getenv("GS_CAPTURE_PATH")) {

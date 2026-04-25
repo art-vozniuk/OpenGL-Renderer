@@ -3,27 +3,15 @@
 
 #include "FileReader.h"
 
-#include <algorithm>
-#include <chrono>
+#include <array>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
-#include <numeric>
 
 #include <glm/gtc/type_ptr.hpp>
 
 namespace Engine {
 
 	namespace {
-
-		// 5-second window at 60 fps for the rolling-max stats panel.
-		constexpr size_t kHistoryFrames = 300;
-
-		using Clock = std::chrono::steady_clock;
-		inline float ElapsedMs(Clock::time_point t0, Clock::time_point t1)
-		{
-			return std::chrono::duration<float, std::milli>(t1 - t0).count();
-		}
 
 		inline WGPUStringView SV(const char* s)
 		{
@@ -33,20 +21,37 @@ namespace Engine {
 			return v;
 		}
 
-		// CPU-side mirror of the WGSL `Uniforms` struct. std::array of floats
-		// because GLM matrices are column-major / 16-byte aligned which
-		// matches WGSL's std140-ish uniform layout.
-		struct UniformsCPU
+		// Render uniform: matches WGSL `Uniforms` in gsplat.wgsl.
+		struct RenderUniforms
 		{
 			glm::mat4 view;
 			glm::mat4 projection;
 			glm::vec2 viewportSize;
 			glm::vec2 _pad;
 		};
-		static_assert(sizeof(UniformsCPU) == 144, "uniform layout drifted");
+		static_assert(sizeof(RenderUniforms) == 144, "render uniform layout drift");
 
-		// Read the WGSL shader source from disk relative to the engine
-		// asset root. Throws via assertion on missing file.
+		// Sort uniform: 32 bytes of payload, but bound with dynamic offset
+		// so each "config" must occupy a 256-byte stride.
+		constexpr size_t kSortUniformPayload = 32;
+		constexpr size_t kSortUniformStride  = 256;
+		constexpr int    kSortConfigInit  = 0;
+		constexpr int    kSortConfigPass0 = 1;  // byte 0 (low), idxPing -> idxPong
+		constexpr int    kSortConfigPass1 = 2;  // byte 1, idxPong -> idxPing
+		constexpr int    kSortConfigPass2 = 3;  // byte 2, idxPing -> idxPong
+		constexpr int    kSortConfigPass3 = 4;  // byte 3, idxPong -> idxPing
+		constexpr int    kSortConfigCount = 5;
+
+		struct SortUniform
+		{
+			float    viewRow2[4];
+			uint32_t N;
+			uint32_t digitShift;
+			uint32_t swap;        // 0 -> read ping write pong, 1 -> reversed
+			uint32_t _pad;
+		};
+		static_assert(sizeof(SortUniform) == 32);
+
 		std::string LoadShaderSource(const std::string& relPath)
 		{
 			namespace fs = std::filesystem;
@@ -63,11 +68,9 @@ namespace Engine {
 	GaussianSplatRenderer::GaussianSplatRenderer(WGPUContext& ctx)
 		: m_Ctx(&ctx)
 	{
-		CreateQuadGeometry();
-		CreateInstanceBuffers();
 		CreateUniformBuffer();
-		CreatePipeline();
-		m_History.assign(kHistoryFrames, PerfStats{});
+		CreateSortResources();
+		CreatePipelines();
 	}
 
 
@@ -77,157 +80,156 @@ namespace Engine {
 	}
 
 
-	void GaussianSplatRenderer::CreateQuadGeometry()
-	{
-		// Unit quad corners in [-1, +1]^2; scaled per-instance by the
-		// vertex shader to bound the projected ellipse.
-		static const float kQuadVerts[] = {
-			-1.0f, -1.0f,
-			 1.0f, -1.0f,
-			 1.0f,  1.0f,
-			-1.0f,  1.0f,
-		};
-		static const uint32_t kQuadIdx[] = { 0, 1, 2, 0, 2, 3 };
-
-		WGPUBufferDescriptor vDesc{};
-		vDesc.label = SV("gsplat-quad-verts");
-		vDesc.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
-		vDesc.size  = sizeof(kQuadVerts);
-		m_QuadVerts = wgpuDeviceCreateBuffer(m_Ctx->Device(), &vDesc);
-		wgpuQueueWriteBuffer(m_Ctx->Queue(), m_QuadVerts, 0, kQuadVerts, sizeof(kQuadVerts));
-
-		WGPUBufferDescriptor iDesc{};
-		iDesc.label = SV("gsplat-quad-idx");
-		iDesc.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
-		iDesc.size  = sizeof(kQuadIdx);
-		m_QuadIndices = wgpuDeviceCreateBuffer(m_Ctx->Device(), &iDesc);
-		wgpuQueueWriteBuffer(m_Ctx->Queue(), m_QuadIndices, 0, kQuadIdx, sizeof(kQuadIdx));
-	}
-
-
-	void GaussianSplatRenderer::CreateInstanceBuffers()
-	{
-		// Buffers grow lazily in Upload(); we just create empty handles
-		// here so the pipeline can reference them. If Upload() never runs
-		// the renderer simply draws zero instances.
-	}
-
-
 	void GaussianSplatRenderer::CreateUniformBuffer()
 	{
-		WGPUBufferDescriptor uDesc{};
-		uDesc.label = SV("gsplat-uniforms");
-		uDesc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
-		uDesc.size  = sizeof(UniformsCPU);
-		m_UniformBuf = wgpuDeviceCreateBuffer(m_Ctx->Device(), &uDesc);
+		// Render uniform — single block.
+		WGPUBufferDescriptor rud{};
+		rud.label = SV("gsplat-render-uniform");
+		rud.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+		rud.size  = sizeof(RenderUniforms);
+		m_RenderUniform = wgpuDeviceCreateBuffer(m_Ctx->Device(), &rud);
 
-		// Bind group layout: just one uniform buffer at @binding(0).
-		WGPUBindGroupLayoutEntry e{};
-		e.binding    = 0;
-		e.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
-		e.buffer.type           = WGPUBufferBindingType_Uniform;
-		e.buffer.minBindingSize = sizeof(UniformsCPU);
-
-		WGPUBindGroupLayoutDescriptor bglDesc{};
-		bglDesc.label      = SV("gsplat-bgl");
-		bglDesc.entryCount = 1;
-		bglDesc.entries    = &e;
-		m_BindLayout = wgpuDeviceCreateBindGroupLayout(m_Ctx->Device(), &bglDesc);
-
-		WGPUBindGroupEntry be{};
-		be.binding = 0;
-		be.buffer  = m_UniformBuf;
-		be.size    = sizeof(UniformsCPU);
-
-		WGPUBindGroupDescriptor bgDesc{};
-		bgDesc.label      = SV("gsplat-bg");
-		bgDesc.layout     = m_BindLayout;
-		bgDesc.entryCount = 1;
-		bgDesc.entries    = &be;
-		m_BindGroup = wgpuDeviceCreateBindGroup(m_Ctx->Device(), &bgDesc);
-
-		WGPUPipelineLayoutDescriptor plDesc{};
-		plDesc.label                = SV("gsplat-pl");
-		plDesc.bindGroupLayoutCount = 1;
-		plDesc.bindGroupLayouts     = &m_BindLayout;
-		m_PipeLayout = wgpuDeviceCreatePipelineLayout(m_Ctx->Device(), &plDesc);
+		// Sort uniform — 5 configs at 256-byte stride for dynamic offset.
+		WGPUBufferDescriptor sud{};
+		sud.label = SV("gsplat-sort-uniform");
+		sud.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+		sud.size  = (uint64_t)kSortUniformStride * kSortConfigCount;
+		m_SortUniform = wgpuDeviceCreateBuffer(m_Ctx->Device(), &sud);
 	}
 
 
-	void GaussianSplatRenderer::CreatePipeline()
+	void GaussianSplatRenderer::CreateSortResources()
 	{
-		const std::string shaderSrc = LoadShaderSource("gsplat.wgsl");
+		const size_t hist = 256 * sizeof(uint32_t);
 
-		WGPUShaderSourceWGSL wgsl{};
-		wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
-		wgsl.code        = SV(shaderSrc.c_str());
-		WGPUShaderModuleDescriptor smDesc{};
-		smDesc.nextInChain = &wgsl.chain;
-		smDesc.label       = SV("gsplat.wgsl");
-		WGPUShaderModule shader = wgpuDeviceCreateShaderModule(m_Ctx->Device(), &smDesc);
-
-		// Vertex buffer layouts: 5 separate buffers, one shared (corner)
-		// stepping per-vertex, four stepping per-instance. WebGPU calls
-		// these "VertexBufferLayout" — equivalent to GL's vertexAttribDivisor.
-		WGPUVertexAttribute aCorner{};
-		aCorner.format         = WGPUVertexFormat_Float32x2;
-		aCorner.offset         = 0;
-		aCorner.shaderLocation = 0;
-		WGPUVertexBufferLayout cornerLayout{};
-		cornerLayout.arrayStride    = sizeof(float) * 2;
-		cornerLayout.stepMode       = WGPUVertexStepMode_Vertex;
-		cornerLayout.attributeCount = 1;
-		cornerLayout.attributes     = &aCorner;
-
-		WGPUVertexAttribute aPos{};
-		aPos.format         = WGPUVertexFormat_Float32x3;
-		aPos.shaderLocation = 1;
-		WGPUVertexBufferLayout posLayout{};
-		posLayout.arrayStride    = sizeof(float) * 3;
-		posLayout.stepMode       = WGPUVertexStepMode_Instance;
-		posLayout.attributeCount = 1;
-		posLayout.attributes     = &aPos;
-
-		WGPUVertexAttribute aScale{};
-		aScale.format         = WGPUVertexFormat_Float32x3;
-		aScale.shaderLocation = 2;
-		WGPUVertexBufferLayout scaleLayout{};
-		scaleLayout.arrayStride    = sizeof(float) * 3;
-		scaleLayout.stepMode       = WGPUVertexStepMode_Instance;
-		scaleLayout.attributeCount = 1;
-		scaleLayout.attributes     = &aScale;
-
-		WGPUVertexAttribute aRot{};
-		aRot.format         = WGPUVertexFormat_Float32x4;
-		aRot.shaderLocation = 3;
-		WGPUVertexBufferLayout rotLayout{};
-		rotLayout.arrayStride    = sizeof(float) * 4;
-		rotLayout.stepMode       = WGPUVertexStepMode_Instance;
-		rotLayout.attributeCount = 1;
-		rotLayout.attributes     = &aRot;
-
-		WGPUVertexAttribute aColor{};
-		aColor.format         = WGPUVertexFormat_Unorm8x4;  // matches u8vec4 normalised
-		aColor.shaderLocation = 4;
-		WGPUVertexBufferLayout colorLayout{};
-		colorLayout.arrayStride    = sizeof(uint8_t) * 4;
-		colorLayout.stepMode       = WGPUVertexStepMode_Instance;
-		colorLayout.attributeCount = 1;
-		colorLayout.attributes     = &aColor;
-
-		WGPUVertexBufferLayout buffers[5] = {
-			cornerLayout, posLayout, scaleLayout, rotLayout, colorLayout
+		auto MakeStorageBuf = [&](size_t bytes, const char* lbl, bool dst = true) -> WGPUBuffer {
+			WGPUBufferDescriptor d{};
+			d.label = SV(lbl);
+			d.usage = WGPUBufferUsage_Storage | (dst ? WGPUBufferUsage_CopyDst : 0);
+			d.size  = bytes;
+			return wgpuDeviceCreateBuffer(m_Ctx->Device(), &d);
 		};
 
-		// Fragment / blend: alpha-over with premultiplied source.
+		m_Hist    = MakeStorageBuf(hist, "gsplat-hist");
+		m_Offsets = MakeStorageBuf(hist, "gsplat-offsets");
+	}
+
+
+	void GaussianSplatRenderer::CreatePipelines()
+	{
+		// ---- Sort bind group layout (dynamic-offset uniform + 6 storage) ----
+		std::array<WGPUBindGroupLayoutEntry, 7> sEntries{};
+
+		sEntries[0].binding    = 0;
+		sEntries[0].visibility = WGPUShaderStage_Compute;
+		sEntries[0].buffer.type             = WGPUBufferBindingType_Uniform;
+		sEntries[0].buffer.hasDynamicOffset = 1;
+		sEntries[0].buffer.minBindingSize   = kSortUniformPayload;
+
+		// positions (read), depths (rw), idxPing (rw), idxPong (rw), hist (rw), offsets (rw)
+		auto stor = [](uint32_t binding, WGPUBufferBindingType ty) {
+			WGPUBindGroupLayoutEntry e{};
+			e.binding    = binding;
+			e.visibility = WGPUShaderStage_Compute;
+			e.buffer.type           = ty;
+			e.buffer.minBindingSize = 0;
+			return e;
+		};
+		sEntries[1] = stor(1, WGPUBufferBindingType_ReadOnlyStorage);
+		sEntries[2] = stor(2, WGPUBufferBindingType_Storage);
+		sEntries[3] = stor(3, WGPUBufferBindingType_Storage);
+		sEntries[4] = stor(4, WGPUBufferBindingType_Storage);
+		sEntries[5] = stor(5, WGPUBufferBindingType_Storage);
+		sEntries[6] = stor(6, WGPUBufferBindingType_Storage);
+
+		WGPUBindGroupLayoutDescriptor sBglDesc{};
+		sBglDesc.label      = SV("gsplat-sort-bgl");
+		sBglDesc.entryCount = sEntries.size();
+		sBglDesc.entries    = sEntries.data();
+		m_SortBGL = wgpuDeviceCreateBindGroupLayout(m_Ctx->Device(), &sBglDesc);
+
+		WGPUPipelineLayoutDescriptor sPlDesc{};
+		sPlDesc.label                = SV("gsplat-sort-pl");
+		sPlDesc.bindGroupLayoutCount = 1;
+		sPlDesc.bindGroupLayouts     = &m_SortBGL;
+		m_SortPL = wgpuDeviceCreatePipelineLayout(m_Ctx->Device(), &sPlDesc);
+
+		// ---- Sort compute pipelines ----
+		const std::string sortSrc = LoadShaderSource("gsplat_sort.wgsl");
+		WGPUShaderSourceWGSL sortWgsl{};
+		sortWgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+		sortWgsl.code        = SV(sortSrc.c_str());
+		WGPUShaderModuleDescriptor smSort{};
+		smSort.nextInChain = &sortWgsl.chain;
+		smSort.label       = SV("gsplat_sort.wgsl");
+		WGPUShaderModule sortShader = wgpuDeviceCreateShaderModule(m_Ctx->Device(), &smSort);
+
+		auto MakeCompute = [&](const char* entry, const char* lbl) -> WGPUComputePipeline {
+			WGPUComputePipelineDescriptor d{};
+			d.label                    = SV(lbl);
+			d.layout                   = m_SortPL;
+			d.compute.module           = sortShader;
+			d.compute.entryPoint       = SV(entry);
+			return wgpuDeviceCreateComputePipeline(m_Ctx->Device(), &d);
+		};
+		m_PipeInit       = MakeCompute("cs_init_depth",  "gsplat-cs-init");
+		m_PipeClearHist  = MakeCompute("cs_clear_hist",  "gsplat-cs-clear");
+		m_PipeHistogram  = MakeCompute("cs_histogram",   "gsplat-cs-hist");
+		m_PipePrefixSum  = MakeCompute("cs_prefix_sum",  "gsplat-cs-prefix");
+		m_PipeScatter    = MakeCompute("cs_scatter",     "gsplat-cs-scatter");
+		wgpuShaderModuleRelease(sortShader);
+
+		// ---- Render bind group layout ----
+		std::array<WGPUBindGroupLayoutEntry, 6> rEntries{};
+
+		rEntries[0].binding    = 0;
+		rEntries[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+		rEntries[0].buffer.type           = WGPUBufferBindingType_Uniform;
+		rEntries[0].buffer.minBindingSize = sizeof(RenderUniforms);
+
+		auto rstor = [](uint32_t binding) {
+			WGPUBindGroupLayoutEntry e{};
+			e.binding    = binding;
+			e.visibility = WGPUShaderStage_Vertex;
+			e.buffer.type           = WGPUBufferBindingType_ReadOnlyStorage;
+			e.buffer.minBindingSize = 0;
+			return e;
+		};
+		rEntries[1] = rstor(1);  // positions
+		rEntries[2] = rstor(2);  // scales
+		rEntries[3] = rstor(3);  // rotations
+		rEntries[4] = rstor(4);  // colors (as raw u32 array)
+		rEntries[5] = rstor(5);  // sortedIndices
+
+		WGPUBindGroupLayoutDescriptor rBglDesc{};
+		rBglDesc.label      = SV("gsplat-render-bgl");
+		rBglDesc.entryCount = rEntries.size();
+		rBglDesc.entries    = rEntries.data();
+		m_RenderBGL = wgpuDeviceCreateBindGroupLayout(m_Ctx->Device(), &rBglDesc);
+
+		WGPUPipelineLayoutDescriptor rPlDesc{};
+		rPlDesc.label                = SV("gsplat-render-pl");
+		rPlDesc.bindGroupLayoutCount = 1;
+		rPlDesc.bindGroupLayouts     = &m_RenderBGL;
+		m_RenderPL = wgpuDeviceCreatePipelineLayout(m_Ctx->Device(), &rPlDesc);
+
+		// ---- Render pipeline ----
+		const std::string renderSrc = LoadShaderSource("gsplat.wgsl");
+		WGPUShaderSourceWGSL rWgsl{};
+		rWgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+		rWgsl.code        = SV(renderSrc.c_str());
+		WGPUShaderModuleDescriptor smR{};
+		smR.nextInChain = &rWgsl.chain;
+		smR.label       = SV("gsplat.wgsl");
+		WGPUShaderModule renderShader = wgpuDeviceCreateShaderModule(m_Ctx->Device(), &smR);
+
 		WGPUBlendComponent colorBlend{};
 		colorBlend.srcFactor = WGPUBlendFactor_One;
 		colorBlend.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
 		colorBlend.operation = WGPUBlendOperation_Add;
-		WGPUBlendComponent alphaBlend = colorBlend;
 		WGPUBlendState blend{};
 		blend.color = colorBlend;
-		blend.alpha = alphaBlend;
+		blend.alpha = colorBlend;
 
 		WGPUColorTargetState target{};
 		target.format    = m_Ctx->SurfaceFormat();
@@ -235,26 +237,23 @@ namespace Engine {
 		target.writeMask = WGPUColorWriteMask_All;
 
 		WGPUFragmentState fs{};
-		fs.module      = shader;
+		fs.module      = renderShader;
 		fs.entryPoint  = SV("fs_main");
 		fs.targetCount = 1;
 		fs.targets     = &target;
 
-		WGPURenderPipelineDescriptor desc{};
-		desc.label                  = SV("gsplat-pipeline");
-		desc.layout                 = m_PipeLayout;
-		desc.vertex.module          = shader;
-		desc.vertex.entryPoint      = SV("vs_main");
-		desc.vertex.bufferCount     = 5;
-		desc.vertex.buffers         = buffers;
-		desc.primitive.topology     = WGPUPrimitiveTopology_TriangleList;
-		desc.primitive.cullMode     = WGPUCullMode_None;
-		desc.multisample.count      = 1;
-		desc.multisample.mask       = 0xFFFFFFFFu;
-		desc.fragment               = &fs;
-
-		m_Pipeline = wgpuDeviceCreateRenderPipeline(m_Ctx->Device(), &desc);
-		wgpuShaderModuleRelease(shader);
+		WGPURenderPipelineDescriptor pdesc{};
+		pdesc.label                  = SV("gsplat-render-pipe");
+		pdesc.layout                 = m_RenderPL;
+		pdesc.vertex.module          = renderShader;
+		pdesc.vertex.entryPoint      = SV("vs_main");
+		pdesc.primitive.topology     = WGPUPrimitiveTopology_TriangleList;
+		pdesc.primitive.cullMode     = WGPUCullMode_None;
+		pdesc.multisample.count      = 1;
+		pdesc.multisample.mask       = 0xFFFFFFFFu;
+		pdesc.fragment               = &fs;
+		m_PipeRender = wgpuDeviceCreateRenderPipeline(m_Ctx->Device(), &pdesc);
+		wgpuShaderModuleRelease(renderShader);
 	}
 
 
@@ -266,226 +265,208 @@ namespace Engine {
 			return;
 		}
 
-		m_Positions = data.positions;
-		m_Scales    = data.scales;
-		m_Rotations = data.rotations;
-		m_Colors    = data.colors;
+		// CPU side: pad vec3 -> vec4 for std430-friendly storage layout.
+		std::vector<glm::vec4> posPadded(m_Count);
+		std::vector<glm::vec4> scalePadded(m_Count);
+		for (size_t i = 0; i < m_Count; ++i) {
+			posPadded[i]   = glm::vec4(data.positions[i], 0.0f);
+			scalePadded[i] = glm::vec4(data.scales[i],    0.0f);
+		}
+		// Colors: pack u8x4 into a single u32 (low byte = R as per WGSL
+		// unpack4x8unorm convention). glm::u8vec4 already is RGBA in mem
+		// little-endian, so a memcpy works.
+		std::vector<uint32_t> colorsPacked(m_Count);
+		std::memcpy(colorsPacked.data(), data.colors.data(), m_Count * sizeof(uint32_t));
 
-		m_SortIndices.resize(m_Count);
-		m_SortIndicesScratch.resize(m_Count);
-		m_SortKeys.resize(m_Count);
-		m_SortKeysScratch.resize(m_Count);
-		m_ScratchVec3.resize(m_Count);
-		m_ScratchVec4.resize(m_Count);
-		m_ScratchRgba.resize(m_Count);
-		m_Depths.resize(m_Count);
-		std::iota(m_SortIndices.begin(), m_SortIndices.end(), uint32_t{0});
-
-		const size_t vec3Bytes = m_Count * sizeof(glm::vec3);
-		const size_t vec4Bytes = m_Count * sizeof(glm::vec4);
-		const size_t rgbaBytes = m_Count * sizeof(glm::u8vec4);
-
-		// Recreate per-instance buffers sized to the dataset. The previous
-		// content (if any) is just released — same as glBufferData on GL.
-		auto MakeVB = [&](WGPUBuffer& buf, size_t bytes, const char* lbl) {
-			if (buf) wgpuBufferRelease(buf);
+		auto MakeStorageWith = [&](WGPUBuffer& dst, const void* src, size_t bytes,
+		                           const char* lbl) {
+			if (dst) wgpuBufferRelease(dst);
 			WGPUBufferDescriptor d{};
 			d.label = SV(lbl);
-			d.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
+			d.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
 			d.size  = bytes;
-			buf = wgpuDeviceCreateBuffer(m_Ctx->Device(), &d);
+			dst = wgpuDeviceCreateBuffer(m_Ctx->Device(), &d);
+			wgpuQueueWriteBuffer(m_Ctx->Queue(), dst, 0, src, bytes);
 		};
 
-		MakeVB(m_PosBuf,   vec3Bytes, "gsplat-pos");
-		MakeVB(m_ScaleBuf, vec3Bytes, "gsplat-scale");
-		MakeVB(m_RotBuf,   vec4Bytes, "gsplat-rot");
-		MakeVB(m_ColorBuf, rgbaBytes, "gsplat-color");
+		MakeStorageWith(m_Pos,   posPadded.data(),   m_Count * sizeof(glm::vec4), "gsplat-pos");
+		MakeStorageWith(m_Scale, scalePadded.data(), m_Count * sizeof(glm::vec4), "gsplat-scale");
+		MakeStorageWith(m_Rot,   data.rotations.data(), m_Count * sizeof(glm::vec4), "gsplat-rot");
+		MakeStorageWith(m_Color, colorsPacked.data(),   m_Count * sizeof(uint32_t), "gsplat-color");
 
-		auto Q = m_Ctx->Queue();
-		wgpuQueueWriteBuffer(Q, m_PosBuf,   0, data.positions.data(), vec3Bytes);
-		wgpuQueueWriteBuffer(Q, m_ScaleBuf, 0, data.scales.data(),    vec3Bytes);
-		wgpuQueueWriteBuffer(Q, m_RotBuf,   0, data.rotations.data(), vec4Bytes);
-		wgpuQueueWriteBuffer(Q, m_ColorBuf, 0, data.colors.data(),    rgbaBytes);
+		// Per-frame sort scratch — sized to N, allocated once.
+		auto MakeStorage = [&](WGPUBuffer& dst, size_t bytes, const char* lbl) {
+			if (dst) wgpuBufferRelease(dst);
+			WGPUBufferDescriptor d{};
+			d.label = SV(lbl);
+			d.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+			d.size  = bytes;
+			dst = wgpuDeviceCreateBuffer(m_Ctx->Device(), &d);
+		};
+		MakeStorage(m_Depths,  m_Count * sizeof(uint32_t), "gsplat-depths");
+		MakeStorage(m_IdxPing, m_Count * sizeof(uint32_t), "gsplat-idx-ping");
+		MakeStorage(m_IdxPong, m_Count * sizeof(uint32_t), "gsplat-idx-pong");
 
-		m_SortValid = false;
-		INFO_CORE("GaussianSplatRenderer: uploaded {0} splats to GPU", (uint64_t)m_Count);
-	}
-
-
-	bool GaussianSplatRenderer::NeedsResort(const glm::mat4& viewMatrix) const
-	{
-		if (!m_SortValid) return true;
-		const glm::vec3 fPrev(-m_LastObservedView[0][2], -m_LastObservedView[1][2], -m_LastObservedView[2][2]);
-		const glm::vec3 fNow (-viewMatrix[0][2],         -viewMatrix[1][2],         -viewMatrix[2][2]);
-		const glm::vec3 pPrev = -glm::vec3(m_LastObservedView[3]);
-		const glm::vec3 pNow  = -glm::vec3(viewMatrix[3]);
-		const bool movingNow = glm::dot(fPrev, fNow) < 0.99999f
-		                    || glm::length(pPrev - pNow) > 1e-4f;
-		return m_WasMovingLastFrame && !movingNow;
-	}
-
-
-	void GaussianSplatRenderer::Sort(const glm::mat4& viewMatrix)
-	{
-		if (m_Count == 0) return;
-		auto tStart = Clock::now();
-
-		// View-space depth as sortable uint32 (sign-bit flip trick — same
-		// as the GL renderer). Sorting ascending uint == ascending float.
-		const float a = viewMatrix[0][2];
-		const float b = viewMatrix[1][2];
-		const float c = viewMatrix[2][2];
-		const float d = viewMatrix[3][2];
-		for (size_t i = 0; i < m_Count; ++i) {
-			const glm::vec3& p = m_Positions[i];
-			float f = a * p.x + b * p.y + c * p.z + d;
-			m_Depths[i] = f;
-			uint32_t u;
-			std::memcpy(&u, &f, 4);
-			m_SortKeys[i] = (u & 0x80000000u) ? ~u : (u ^ 0x80000000u);
+		// Build sort + render bind groups now that all buffers exist.
+		{
+			std::array<WGPUBindGroupEntry, 7> e{};
+			auto fill = [&](size_t i, uint32_t b, WGPUBuffer buf, uint64_t size) {
+				e[i].binding = b; e[i].buffer = buf; e[i].size = size;
+			};
+			fill(0, 0, m_SortUniform, kSortUniformPayload);
+			fill(1, 1, m_Pos,       WGPU_WHOLE_SIZE);
+			fill(2, 2, m_Depths,    WGPU_WHOLE_SIZE);
+			fill(3, 3, m_IdxPing,   WGPU_WHOLE_SIZE);
+			fill(4, 4, m_IdxPong,   WGPU_WHOLE_SIZE);
+			fill(5, 5, m_Hist,      WGPU_WHOLE_SIZE);
+			fill(6, 6, m_Offsets,   WGPU_WHOLE_SIZE);
+			WGPUBindGroupDescriptor bgd{};
+			bgd.label      = SV("gsplat-sort-bg");
+			bgd.layout     = m_SortBGL;
+			bgd.entryCount = e.size();
+			bgd.entries    = e.data();
+			if (m_SortBG) wgpuBindGroupRelease(m_SortBG);
+			m_SortBG = wgpuDeviceCreateBindGroup(m_Ctx->Device(), &bgd);
+		}
+		{
+			std::array<WGPUBindGroupEntry, 6> e{};
+			auto fill = [&](size_t i, uint32_t b, WGPUBuffer buf, uint64_t size) {
+				e[i].binding = b; e[i].buffer = buf; e[i].size = size;
+			};
+			fill(0, 0, m_RenderUniform, sizeof(RenderUniforms));
+			fill(1, 1, m_Pos,    WGPU_WHOLE_SIZE);
+			fill(2, 2, m_Scale,  WGPU_WHOLE_SIZE);
+			fill(3, 3, m_Rot,    WGPU_WHOLE_SIZE);
+			fill(4, 4, m_Color,  WGPU_WHOLE_SIZE);
+			// 4 byte-passes each ping<->pong flips the buffer; final state
+			// after 4 swaps is back to IdxPing.
+			fill(5, 5, m_IdxPing, WGPU_WHOLE_SIZE);
+			WGPUBindGroupDescriptor bgd{};
+			bgd.label      = SV("gsplat-render-bg");
+			bgd.layout     = m_RenderBGL;
+			bgd.entryCount = e.size();
+			bgd.entries    = e.data();
+			if (m_RenderBG) wgpuBindGroupRelease(m_RenderBG);
+			m_RenderBG = wgpuDeviceCreateBindGroup(m_Ctx->Device(), &bgd);
 		}
 
-		// LSD radix sort — 4 byte-wide passes. Same as the GL impl.
-		std::iota(m_SortIndices.begin(), m_SortIndices.end(), uint32_t{0});
-		for (int byteIdx = 0; byteIdx < 4; ++byteIdx) {
-			const int shift = byteIdx * 8;
-			uint32_t buckets[256] = {0};
-			for (size_t i = 0; i < m_Count; ++i)
-				++buckets[(m_SortKeys[i] >> shift) & 0xFFu];
-			uint32_t sum = 0;
-			for (int bk = 0; bk < 256; ++bk) {
-				uint32_t cnt = buckets[bk];
-				buckets[bk] = sum;
-				sum += cnt;
-			}
-			for (size_t i = 0; i < m_Count; ++i) {
-				uint32_t k  = m_SortKeys[i];
-				uint32_t id = m_SortIndices[i];
-				uint32_t dst = buckets[(k >> shift) & 0xFFu]++;
-				m_SortKeysScratch[dst]    = k;
-				m_SortIndicesScratch[dst] = id;
-			}
-			m_SortKeys.swap(m_SortKeysScratch);
-			m_SortIndices.swap(m_SortIndicesScratch);
-		}
-
-		auto tSorted = Clock::now();
-
-		// Reshuffle each attribute into scratch + upload to its GPU buffer.
-		auto Q = m_Ctx->Queue();
-
-		for (size_t i = 0; i < m_Count; ++i) m_ScratchVec3[i] = m_Positions[m_SortIndices[i]];
-		auto tPosReshuffle = Clock::now();
-		wgpuQueueWriteBuffer(Q, m_PosBuf, 0, m_ScratchVec3.data(),
-		                     m_Count * sizeof(glm::vec3));
-
-		for (size_t i = 0; i < m_Count; ++i) m_ScratchVec3[i] = m_Scales[m_SortIndices[i]];
-		wgpuQueueWriteBuffer(Q, m_ScaleBuf, 0, m_ScratchVec3.data(),
-		                     m_Count * sizeof(glm::vec3));
-
-		for (size_t i = 0; i < m_Count; ++i) m_ScratchVec4[i] = m_Rotations[m_SortIndices[i]];
-		wgpuQueueWriteBuffer(Q, m_RotBuf, 0, m_ScratchVec4.data(),
-		                     m_Count * sizeof(glm::vec4));
-
-		for (size_t i = 0; i < m_Count; ++i) m_ScratchRgba[i] = m_Colors[m_SortIndices[i]];
-		wgpuQueueWriteBuffer(Q, m_ColorBuf, 0, m_ScratchRgba.data(),
-		                     m_Count * sizeof(glm::u8vec4));
-
-		auto tUploaded = Clock::now();
-
-		m_LastFrame.sortMs      = ElapsedMs(tStart, tSorted);
-		m_LastFrame.reshuffleMs = ElapsedMs(tSorted, tPosReshuffle);
-		m_LastFrame.uploadMs    = ElapsedMs(tPosReshuffle, tUploaded);
-
-		m_LastSortView = viewMatrix;
-		m_SortValid = true;
+		INFO_CORE("GaussianSplatRenderer: uploaded {0} splats to GPU (storage layout)", (uint64_t)m_Count);
 	}
 
 
-	void GaussianSplatRenderer::Render(WGPURenderPassEncoder pass,
-	                                   const SPtr<Camera>& camera,
-	                                   const glm::vec2& viewportSize)
+	void GaussianSplatRenderer::EncodeSort(WGPUCommandEncoder encoder, const glm::mat4& viewMatrix)
 	{
 		if (m_Count == 0) return;
-		m_LastFrame = PerfStats{};
 
-		const glm::mat4& view = camera->GetViewMatrix();
+		// Build all 5 sort-uniform configs into a single contiguous block,
+		// then one writeBuffer to push them.
+		std::array<uint8_t, kSortUniformStride * kSortConfigCount> blob{};
+		auto WriteCfg = [&](int slot, uint32_t shift, uint32_t swap) {
+			SortUniform su{};
+			su.viewRow2[0] = viewMatrix[0][2];
+			su.viewRow2[1] = viewMatrix[1][2];
+			su.viewRow2[2] = viewMatrix[2][2];
+			su.viewRow2[3] = viewMatrix[3][2];
+			su.N           = (uint32_t)m_Count;
+			su.digitShift  = shift;
+			su.swap        = swap;
+			std::memcpy(blob.data() + slot * kSortUniformStride, &su, sizeof(su));
+		};
+		WriteCfg(kSortConfigInit,  0,  0);
+		WriteCfg(kSortConfigPass0, 0,  0);  // ping -> pong
+		WriteCfg(kSortConfigPass1, 8,  1);  // pong -> ping
+		WriteCfg(kSortConfigPass2, 16, 0);  // ping -> pong
+		WriteCfg(kSortConfigPass3, 24, 1);  // pong -> ping
+		wgpuQueueWriteBuffer(m_Ctx->Queue(), m_SortUniform, 0, blob.data(), blob.size());
 
-		const glm::vec3 fPrev(-m_LastObservedView[0][2], -m_LastObservedView[1][2], -m_LastObservedView[2][2]);
-		const glm::vec3 fNow (-view[0][2],               -view[1][2],               -view[2][2]);
-		const glm::vec3 pPrev = -glm::vec3(m_LastObservedView[3]);
-		const glm::vec3 pNow  = -glm::vec3(view[3]);
-		const bool movingNow = glm::dot(fPrev, fNow) < 0.99999f
-		                    || glm::length(pPrev - pNow) > 1e-4f;
+		const uint32_t wgN    = ((uint32_t)m_Count + 255u) / 256u;
+		const uint32_t wgHist = 1u;  // 256 threads = one workgroup
 
-		if (NeedsResort(view)) Sort(view);
+		auto SetSortBG = [&](WGPUComputePassEncoder cp, uint32_t cfg) {
+			uint32_t off = cfg * (uint32_t)kSortUniformStride;
+			wgpuComputePassEncoderSetBindGroup(cp, 0, m_SortBG, 1, &off);
+		};
 
-		m_LastObservedView   = view;
-		m_WasMovingLastFrame = movingNow;
+		WGPUComputePassDescriptor cpd{};
+		cpd.label = SV("gsplat-sort");
+		WGPUComputePassEncoder cp = wgpuCommandEncoderBeginComputePass(encoder, &cpd);
 
-		// Push camera + viewport to the uniform buffer.
-		UniformsCPU u{};
-		u.view         = view;
+		// 1. init depth + identity perm into IdxPing
+		wgpuComputePassEncoderSetPipeline(cp, m_PipeInit);
+		SetSortBG(cp, kSortConfigInit);
+		wgpuComputePassEncoderDispatchWorkgroups(cp, wgN, 1, 1);
+
+		auto OnePass = [&](int cfg) {
+			// clear hist
+			wgpuComputePassEncoderSetPipeline(cp, m_PipeClearHist);
+			SetSortBG(cp, cfg);
+			wgpuComputePassEncoderDispatchWorkgroups(cp, wgHist, 1, 1);
+			// histogram
+			wgpuComputePassEncoderSetPipeline(cp, m_PipeHistogram);
+			SetSortBG(cp, cfg);
+			wgpuComputePassEncoderDispatchWorkgroups(cp, wgN, 1, 1);
+			// prefix sum
+			wgpuComputePassEncoderSetPipeline(cp, m_PipePrefixSum);
+			SetSortBG(cp, cfg);
+			wgpuComputePassEncoderDispatchWorkgroups(cp, 1, 1, 1);
+			// scatter
+			wgpuComputePassEncoderSetPipeline(cp, m_PipeScatter);
+			SetSortBG(cp, cfg);
+			wgpuComputePassEncoderDispatchWorkgroups(cp, wgN, 1, 1);
+		};
+		OnePass(kSortConfigPass0);
+		OnePass(kSortConfigPass1);
+		OnePass(kSortConfigPass2);
+		OnePass(kSortConfigPass3);
+
+		wgpuComputePassEncoderEnd(cp);
+		wgpuComputePassEncoderRelease(cp);
+
+		m_FinalIsPing = true;  // 4 swaps -> back to IdxPing
+	}
+
+
+	void GaussianSplatRenderer::EncodeRender(WGPURenderPassEncoder pass,
+	                                          const SPtr<Camera>& camera,
+	                                          const glm::vec2& viewportSize)
+	{
+		if (m_Count == 0) return;
+
+		RenderUniforms u{};
+		u.view         = camera->GetViewMatrix();
 		u.projection   = camera->GetProjectionMatrix();
 		u.viewportSize = viewportSize;
-		wgpuQueueWriteBuffer(m_Ctx->Queue(), m_UniformBuf, 0, &u, sizeof(u));
+		wgpuQueueWriteBuffer(m_Ctx->Queue(), m_RenderUniform, 0, &u, sizeof(u));
 
-		auto tDrawStart = Clock::now();
-		wgpuRenderPassEncoderSetPipeline(pass, m_Pipeline);
-		wgpuRenderPassEncoderSetBindGroup(pass, 0, m_BindGroup, 0, nullptr);
-
-		// Vertex buffers, slot 0..4 (corner, pos, scale, rot, color).
-		wgpuRenderPassEncoderSetVertexBuffer(pass, 0, m_QuadVerts, 0, WGPU_WHOLE_SIZE);
-		wgpuRenderPassEncoderSetVertexBuffer(pass, 1, m_PosBuf,    0, WGPU_WHOLE_SIZE);
-		wgpuRenderPassEncoderSetVertexBuffer(pass, 2, m_ScaleBuf,  0, WGPU_WHOLE_SIZE);
-		wgpuRenderPassEncoderSetVertexBuffer(pass, 3, m_RotBuf,    0, WGPU_WHOLE_SIZE);
-		wgpuRenderPassEncoderSetVertexBuffer(pass, 4, m_ColorBuf,  0, WGPU_WHOLE_SIZE);
-
-		wgpuRenderPassEncoderSetIndexBuffer(pass, m_QuadIndices,
-		                                    WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
-		wgpuRenderPassEncoderDrawIndexed(pass,
-		                                 /*indexCount=*/6,
-		                                 /*instanceCount=*/(uint32_t)m_Count,
-		                                 /*firstIndex=*/0,
-		                                 /*baseVertex=*/0,
-		                                 /*firstInstance=*/0);
-		// drawMs measures CPU-side encode time only without an explicit
-		// GPU sync; getting real GPU time needs a timestamp query
-		// (compute follow-up).
-		m_LastFrame.drawMs = ElapsedMs(tDrawStart, Clock::now());
-
-		m_History[m_HistoryHead] = m_LastFrame;
-		m_HistoryHead = (m_HistoryHead + 1) % m_History.size();
-	}
-
-
-	GaussianSplatRenderer::PerfStats GaussianSplatRenderer::MaxLast5s() const
-	{
-		PerfStats m{};
-		for (const auto& s : m_History) {
-			m.sortMs      = std::max(m.sortMs,      s.sortMs);
-			m.reshuffleMs = std::max(m.reshuffleMs, s.reshuffleMs);
-			m.uploadMs    = std::max(m.uploadMs,    s.uploadMs);
-			m.drawMs      = std::max(m.drawMs,      s.drawMs);
-		}
-		return m;
+		wgpuRenderPassEncoderSetPipeline(pass, m_PipeRender);
+		wgpuRenderPassEncoderSetBindGroup(pass, 0, m_RenderBG, 0, nullptr);
+		// Draw 6 verts/instance (two triangles), N instances. No index/vertex
+		// buffer needed — corners are a const in the shader.
+		wgpuRenderPassEncoderDraw(pass, 6, (uint32_t)m_Count, 0, 0);
 	}
 
 
 	void GaussianSplatRenderer::DestroyGpuResources()
 	{
-		auto Drop = [](WGPUBuffer& b)             { if (b) { wgpuBufferRelease(b); b = nullptr; } };
-		Drop(m_QuadVerts);
-		Drop(m_QuadIndices);
-		Drop(m_PosBuf);
-		Drop(m_ScaleBuf);
-		Drop(m_RotBuf);
-		Drop(m_ColorBuf);
-		Drop(m_UniformBuf);
-		if (m_Pipeline)   { wgpuRenderPipelineRelease(m_Pipeline);     m_Pipeline   = nullptr; }
-		if (m_PipeLayout) { wgpuPipelineLayoutRelease(m_PipeLayout);   m_PipeLayout = nullptr; }
-		if (m_BindGroup)  { wgpuBindGroupRelease(m_BindGroup);         m_BindGroup  = nullptr; }
-		if (m_BindLayout) { wgpuBindGroupLayoutRelease(m_BindLayout);  m_BindLayout = nullptr; }
+		auto Drop = [](WGPUBuffer& b) { if (b) { wgpuBufferRelease(b); b = nullptr; } };
+		Drop(m_Pos); Drop(m_Scale); Drop(m_Rot); Drop(m_Color);
+		Drop(m_Depths); Drop(m_IdxPing); Drop(m_IdxPong);
+		Drop(m_Hist); Drop(m_Offsets);
+		Drop(m_RenderUniform); Drop(m_SortUniform);
+
+		if (m_PipeInit)      { wgpuComputePipelineRelease(m_PipeInit);      m_PipeInit      = nullptr; }
+		if (m_PipeClearHist) { wgpuComputePipelineRelease(m_PipeClearHist); m_PipeClearHist = nullptr; }
+		if (m_PipeHistogram) { wgpuComputePipelineRelease(m_PipeHistogram); m_PipeHistogram = nullptr; }
+		if (m_PipePrefixSum) { wgpuComputePipelineRelease(m_PipePrefixSum); m_PipePrefixSum = nullptr; }
+		if (m_PipeScatter)   { wgpuComputePipelineRelease(m_PipeScatter);   m_PipeScatter   = nullptr; }
+		if (m_PipeRender)    { wgpuRenderPipelineRelease(m_PipeRender);     m_PipeRender    = nullptr; }
+
+		if (m_SortBG)     { wgpuBindGroupRelease(m_SortBG);             m_SortBG     = nullptr; }
+		if (m_RenderBG)   { wgpuBindGroupRelease(m_RenderBG);           m_RenderBG   = nullptr; }
+		if (m_SortBGL)    { wgpuBindGroupLayoutRelease(m_SortBGL);      m_SortBGL    = nullptr; }
+		if (m_RenderBGL)  { wgpuBindGroupLayoutRelease(m_RenderBGL);    m_RenderBGL  = nullptr; }
+		if (m_SortPL)     { wgpuPipelineLayoutRelease(m_SortPL);        m_SortPL     = nullptr; }
+		if (m_RenderPL)   { wgpuPipelineLayoutRelease(m_RenderPL);      m_RenderPL   = nullptr; }
 	}
 
 }

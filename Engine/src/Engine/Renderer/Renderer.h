@@ -29,20 +29,26 @@ namespace Engine {
 		static void Init(WGPUContext* ctx);
 		static void Shutdown();
 
-		// Per-frame book-keeping.
+		// Per-frame book-keeping. Two-phase to let the scene encode compute
+		// dispatches (e.g. GPU sort) before the render pass is opened:
 		//
-		// BeginScene acquires the swap-chain view + opens a render pass
-		// pre-cleared to the supplied colour. EndScene closes the pass and
-		// presents. Returns false from BeginScene if the surface lost the
-		// frame (transient resize), in which case the caller should skip
-		// rendering and call EndScene anyway to release.
-		static bool BeginScene(const SPtr<Camera>& camera,
-		                       float r = 0.05f, float g = 0.05f, float b = 0.08f, float a = 1.0f);
+		//     if (!Renderer::BeginScene(camera)) return;
+		//     scene_compute(Renderer::Encoder());          // optional
+		//     Renderer::OpenColorPass(r, g, b, a);
+		//     scene_render(Renderer::CurrentPass());
+		//     Renderer::EndScene();
+		//
+		// BeginScene returns false if the surface lost the frame (transient
+		// resize) — caller should skip render + still call EndScene to
+		// release the slot.
+		static bool BeginScene(const SPtr<Camera>& camera);
+		static void OpenColorPass(float r = 0.05f, float g = 0.05f, float b = 0.08f, float a = 1.0f);
 		static void EndScene();
 
 		// Active resources for use inside a BeginScene/EndScene pair.
 		static WGPUContext*           Context();
-		static WGPURenderPassEncoder  CurrentPass();
+		static WGPUCommandEncoder     Encoder();      // valid between BeginScene and EndScene
+		static WGPURenderPassEncoder  CurrentPass();  // valid between OpenColorPass and EndScene
 		static const SPtr<Camera>&    GetCamera();
 
 		// Schedule a one-shot framebuffer capture. The next EndScene call
