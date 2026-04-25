@@ -8,8 +8,7 @@
 #include "Engine/Events/ApplicationEvent.h"
 
 #include "Engine/Core/Timestep.h"
-
-#include "Engine/ImGui/ImGuiLayer.h"
+#include "Engine/Renderer/WGPUContext.h"
 
 namespace Engine {
 
@@ -17,7 +16,7 @@ namespace Engine {
 	{
 	public:
 		Application();
-		virtual ~Application() = default;
+		virtual ~Application();
 
 		void Run();
 		void RunOneFrame();
@@ -27,24 +26,27 @@ namespace Engine {
 		void PushLayer(Layer* layer);
 		void PushOverlay(Layer* layer);
 
-		inline Window& GetWindow() { return *m_Window; }
+		inline Window&      GetWindow() { return *m_Window; }
+		// WebGPU device / surface / queue access for scenes that need to
+		// build their own pipelines + buffers.
+		inline WGPUContext& GetGfx()    { return m_Gfx; }
 
 		inline static Application& Get() { return *s_Instance; }
 	private:
 		bool OnWindowClose(WindowCloseEvent& e);
+		bool OnWindowResize(WindowResizeEvent& e);
 	private:
 		std::unique_ptr<Window> m_Window;
-		ImGuiLayer* m_ImGuiLayer = nullptr;
-		bool m_Running = true;
-		LayerStack m_LayerStack;
-		float m_LastFrameTime = 0.0f;
+		WGPUContext             m_Gfx;
+		bool                    m_Running        = true;
+		LayerStack              m_LayerStack;
+		float                   m_LastFrameTime  = 0.0f;
 	private:
 		static Application* s_Instance;
 	};
 
-	// To be defined in CLIENT. Argv is forwarded from main() so the client
-	// can parse its own command-line flags without threading argc/argv
-	// through the engine core.
+	// Implemented by the client application. Argv passes through from main()
+	// for command-line parsing.
 	Application* CreateApplication(int argc, char** argv);
 
 }

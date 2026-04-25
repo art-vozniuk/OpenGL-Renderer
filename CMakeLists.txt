@@ -25,9 +25,58 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(tinygltf)
 
+# ============================================================
+#  WebGPU (Dawn on native via Metal/Vulkan/D3D12, browser API on web)
+#
+#  We use eliemichel/WebGPU-distribution which exposes a single `webgpu`
+#  CMake target that:
+#    - on emscripten: passes -sUSE_WEBGPU=1 and provides <webgpu/webgpu.h>
+#    - on native: pulls Dawn, builds it, links its Metal/Vulkan backend
+#  This way the same C source compiles on both targets without ifdefs.
+#
+#  glfw3webgpu glues a GLFWwindow to a wgpu::Surface — Dawn doesn't
+#  ship that helper itself.
+# ============================================================
+# Pick Dawn (Google's reference WebGPU implementation) over wgpu-native
+# (Rust). Dawn is what Chromium ships, more thoroughly tested on Mac/Metal,
+# statically linkable so no DYLD path gymnastics, and crucially its C API
+# is in lock-step with glfw3webgpu's expectations. wgpu-native v24+ uses
+# WGPUStringView which the glfw3webgpu glue doesn't grok.
+set(WEBGPU_BACKEND "DAWN" CACHE STRING "" FORCE)
+# Use a pre-cached clone of WebGPU-distribution at /tmp/webgpu-cache to avoid
+# repeated `git fetch` failures inside FetchContent (we hit transient
+# `invalid index-pack output` errors on this network). Falls back to a
+# fresh clone if the cache directory doesn't exist.
+if(EXISTS "/tmp/webgpu-cache/webgpu-src/CMakeLists.txt")
+    FetchContent_Declare(webgpu SOURCE_DIR "/tmp/webgpu-cache/webgpu-src")
+else()
+    FetchContent_Declare(
+        webgpu
+        GIT_REPOSITORY https://github.com/eliemichel/WebGPU-distribution
+        GIT_TAG        v0.3.0-gamma
+        GIT_SHALLOW    ON
+    )
+endif()
+FetchContent_MakeAvailable(webgpu)
+
+# glfw3webgpu — only needed on native (emscripten provides the glue).
+if(NOT EMSCRIPTEN)
+    if(EXISTS "/tmp/webgpu-cache/glfw3webgpu-src/CMakeLists.txt")
+        FetchContent_Declare(glfw3webgpu SOURCE_DIR "/tmp/webgpu-cache/glfw3webgpu-src")
+    else()
+        FetchContent_Declare(
+            glfw3webgpu
+            GIT_REPOSITORY https://github.com/eliemichel/glfw3webgpu
+            GIT_TAG        v1.3.0-alpha
+            GIT_SHALLOW    ON
+        )
+    endif()
+    FetchContent_MakeAvailable(glfw3webgpu)
+endif()
+
 
 # ============================================================
-#  NATIVE-ONLY dependencies (GLFW window + GLAD loader)
+#  NATIVE-ONLY dependencies (GLFW window — GLAD removed with OpenGL)
 # ============================================================
 if(NOT EMSCRIPTEN)
     set(CMAKE_DISABLE_FIND_PACKAGE_Vulkan ON)
@@ -38,13 +87,16 @@ if(NOT EMSCRIPTEN)
     set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
     set(GLFW_VULKAN_STATIC  OFF CACHE BOOL "" FORCE)
 
-    add_subdirectory(Engine/vendor/GLFW EXCLUDE_FROM_ALL)
-
-    find_package(OpenGL REQUIRED)
-
-    add_library(Glad STATIC Engine/vendor/Glad/src/glad.c)
-    target_include_directories(Glad SYSTEM PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/Glad/include")
+    # GLFW 3.4 — needed for `glfwGetPlatform`, used by glfw3webgpu's
+    # cross-platform surface picker. The vendored GLFW under
+    # Engine/vendor/GLFW is 3.3, predates that API.
+    FetchContent_Declare(
+        glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw
+        GIT_TAG        3.4
+        GIT_SHALLOW    ON
+    )
+    FetchContent_MakeAvailable(glfw)
 endif()
 
 # ============================================================
@@ -95,19 +147,24 @@ target_include_directories(Engine
 )
 
 # ---- compile definitions (platform-aware) ----
+# WebGPU uses [0, 1] clip-space Z (like D3D / Vulkan), unlike OpenGL's
+# [-1, 1]. Force GLM's perspective/ortho to emit ZO matrices everywhere
+# so downstream code doesn't have to remember which projection convention
+# its renderer expects.
 if(NOT EMSCRIPTEN)
     target_compile_definitions(Engine
         PUBLIC
             ENGINE_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
             GLFW_INCLUDE_NONE
+            GLM_FORCE_DEPTH_ZERO_TO_ONE
             $<$<CONFIG:Debug>:DEBUG>
             $<$<NOT:$<CONFIG:Debug>>:RELEASE>
-            $<$<PLATFORM_ID:Darwin>:GL_SILENCE_DEPRECATION>
     )
 else()
     target_compile_definitions(Engine
         PUBLIC
             ENGINE_ASSETS_DIR="/assets"
+            GLM_FORCE_DEPTH_ZERO_TO_ONE
             $<$<CONFIG:Debug>:DEBUG>
             $<$<NOT:$<CONFIG:Debug>>:RELEASE>
             # spdlog's bundled fmt defines fmt::char8_t which triggers
@@ -129,21 +186,20 @@ target_include_directories(Engine SYSTEM PUBLIC
     "${tinygltf_SOURCE_DIR}"
 )
 
-if(NOT EMSCRIPTEN)
-    target_include_directories(Engine SYSTEM PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/Glad/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/GLFW/include"
-    )
-endif()
+# GLFW headers come from the FetchContent target on native and from the
+# emscripten contrib port on web — no manual include path needed.
 
 # ---- link libraries ----
+# WebGPU branch: Engine consumes the `webgpu` target on both native and web.
+# On native we also link GLFW + glfw3webgpu for window/surface creation.
+# Glad / OpenGL::GL are gone with the OpenGL platform layer.
 if(NOT EMSCRIPTEN)
     target_link_libraries(Engine
         PUBLIC
-            Glad
             ImGui
-            OpenGL::GL
+            webgpu
             glfw
+            glfw3webgpu
             vendor_glm
             vendor_spdlog
     )
@@ -151,10 +207,39 @@ else()
     target_link_libraries(Engine
         PUBLIC
             ImGui
+            webgpu
             vendor_glm
             vendor_spdlog
     )
 endif()
+
+# ============================================================
+#  HelloTriangle — minimal stand-alone WebGPU smoke test
+#
+#  Doesn't link Engine; just GLFW + WebGPU. If this builds and runs,
+#  the Dawn / glfw3webgpu / WGSL toolchain is healthy and the larger
+#  Engine port has no infrastructure surprises waiting.
+# ============================================================
+add_executable(HelloTriangle
+    Sandbox/src/HelloTriangle/HelloTriangleApp.cpp
+)
+target_link_libraries(HelloTriangle PRIVATE webgpu)
+if(NOT EMSCRIPTEN)
+    target_link_libraries(HelloTriangle PRIVATE glfw glfw3webgpu)
+endif()
+if(EMSCRIPTEN)
+    set_target_properties(HelloTriangle PROPERTIES SUFFIX ".html")
+    target_link_options(HelloTriangle PRIVATE
+        --use-port=contrib.glfw3
+        -sUSE_WEBGPU=1
+        -sASYNCIFY  # for emscripten_sleep in adapter/device request loop
+        -sALLOW_MEMORY_GROWTH=1
+    )
+    target_compile_options(HelloTriangle PRIVATE
+        --use-port=contrib.glfw3
+    )
+endif()
+
 
 # ============================================================
 #  Sandbox executable
@@ -164,6 +249,9 @@ if(OPENGL_RENDERER_BUILD_SANDBOX)
         "${CMAKE_CURRENT_SOURCE_DIR}/Sandbox/src/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Sandbox/src/*.h"
     )
+    # HelloTriangle has its own main() and doesn't link Engine; remove its
+    # source from the Sandbox glob so we don't end up with two main() symbols.
+    list(FILTER SANDBOX_SOURCES EXCLUDE REGEX "Sandbox/src/HelloTriangle/.*")
 
     add_executable(Sandbox ${SANDBOX_SOURCES})
     target_link_libraries(Sandbox PRIVATE Engine)

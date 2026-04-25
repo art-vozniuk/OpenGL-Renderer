@@ -28,6 +28,7 @@ namespace Sandbox {
 		Engine::FlyCamera m_Camera;
 		std::unique_ptr<Engine::GaussianSplatRenderer> m_Splats;
 		size_t m_SplatCount = 0;
+		int    m_FrameCount = 0;
 	};
 
 }

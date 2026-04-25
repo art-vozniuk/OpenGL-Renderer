@@ -46,7 +46,9 @@ namespace Sandbox {
 
 		std::unordered_map<std::string, Factory> m_Factories;
 		std::vector<std::string> m_Ids;
-		std::string m_DefaultId = "gsplat_hq";
+		// gsplat (train.splat, antimatter15 format) is the only scene that
+		// has been ported to WebGPU. Sponza + gsplat_hq removed for now.
+		std::string m_DefaultId = "gsplat";
 	};
 
 

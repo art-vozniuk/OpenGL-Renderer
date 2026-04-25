@@ -1,8 +1,8 @@
 #pragma once
 
 #include "SplatLoader.h"
-#include "Shader.h"
 #include "Camera.h"
+#include "WGPUContext.h"
 #include "../Core.h"
 
 #include <cstdint>
@@ -11,157 +11,119 @@
 namespace Engine {
 
 	/*
-	 * Stand-alone renderer for a single gaussian-splat scene.
+	 * Stand-alone WebGPU renderer for a single Gaussian-splat scene.
 	 *
 	 * Owns:
-	 *   - a shared quad VAO (4 corner vertices + 6 indices)
-	 *   - four per-instance VBOs (SoA: positions, scales, rotations, colors)
+	 *   - one shared 6-index quad (4 corner verts + 6 indices)
+	 *   - four per-instance vertex buffers (SoA: positions, scales,
+	 *     rotations, colors)
+	 *   - a uniform buffer with view / projection / viewport
+	 *   - one render pipeline (alpha-over blend, no depth, instanced
+	 *     triangle-list draw of `m_Count` quads)
 	 *
-	 * Rendering path is deliberately separate from the forward mesh renderer
-	 * because the draw setup is fundamentally different: no depth write,
-	 * premultiplied-alpha blending, and an instanced draw call that issues
-	 * one quad per splat.
+	 * Per-frame the caller hands us an already-open WGPURenderPassEncoder
+	 * (the swap-chain colour pass) and we encode our draw into it. Set-up
+	 * and tear-down (clear, present) happen in the surrounding Renderer
+	 * code.
 	 *
-	 * The caller is responsible for setting / restoring GL state around
-	 * Render(); the renderer itself just does what it needs for its own
-	 * draw and puts blend/depth back to a sensible default on exit.
+	 * This is the WebGPU port of the original GL renderer; the SH
+	 * (.ply view-dependent) path is temporarily disabled — only the
+	 * antimatter15 .splat flat-colour path is wired up here. Will be
+	 * brought back once the GS scene is solid.
 	 */
 	class GaussianSplatRenderer
 	{
 	public:
-		GaussianSplatRenderer();
+		explicit GaussianSplatRenderer(WGPUContext& ctx);
 		~GaussianSplatRenderer();
 
 		GaussianSplatRenderer(const GaussianSplatRenderer&) = delete;
 		GaussianSplatRenderer& operator=(const GaussianSplatRenderer&) = delete;
 
-		// Reloads GPU buffers from a parsed splat dataset. Safe to call
-		// multiple times (replaces previous data).
+		// Reload GPU buffers from a parsed splat dataset. Idempotent.
 		void Upload(const SplatData& data);
 
-		// Draws the splats using the provided camera. Expects the default
-		// framebuffer to be bound; does NOT clear. Caller sets up the camera
-		// matrices via the shader uniforms indirectly (this method uploads
-		// them from the camera object).
-		void Render(const SPtr<Camera>& camera, const glm::vec2& viewportSize);
+		// Encode a draw into the active render pass.
+		// `pass` must be the pass opened by the renderer for this frame
+		// (cleared, no depth, sized to `viewportSize`). Updates the camera
+		// uniform buffer and issues the instanced draw.
+		void Render(WGPURenderPassEncoder pass,
+		            const SPtr<Camera>& camera,
+		            const glm::vec2& viewportSize);
 
 		size_t SplatCount() const { return m_Count; }
 
-		// Runtime toggle: when true the SH shader path is bypassed and the
-		// flat-colour (DC-only, uint8) shader runs even if SH data is loaded.
-		// Lets the UI compare "with SH" vs "without SH" on the same dataset.
-		void SetSHDisabled(bool disabled) { m_ShDisabled = disabled; }
-		bool IsSHDisabled() const { return m_ShDisabled; }
-		bool HasSH() const { return m_ShTex != 0; }
-
-		// Runs an immediate back-to-front sort outside the render loop.
-		// Call once after Upload() + initial camera setup so the first
-		// visible frame is already sorted (otherwise the first frame
-		// renders in file order and only gets sorted on frame 2).
+		// Force a back-to-front sort against the supplied view matrix.
+		// Used at scene-start so frame 0 is already sorted instead of
+		// rendering in file order until the next motion-stop.
 		void SortNow(const glm::mat4& viewMatrix) { Sort(viewMatrix); }
 
-		// Per-stage timing snapshot — the GUI reads this each frame to show
-		// a "max over the last N seconds" number for each phase. A stage
-		// with a zero sample this frame (e.g. no sort ran) is ignored when
-		// computing the rolling max.
+		// Per-stage timing snapshot — same shape as the GL renderer's
+		// stats so the UI can display them once we re-enable ImGui.
 		struct PerfStats {
-			float sortMs      = 0.0f;  // std::sort + index build
-			float reshuffleMs = 0.0f;  // CPU scratch-buffer reorder
-			float uploadMs    = 0.0f;  // 4x glBufferSubData
-			float drawMs      = 0.0f;  // glDrawElementsInstanced + glFinish
+			float sortMs      = 0.0f;
+			float reshuffleMs = 0.0f;
+			float uploadMs    = 0.0f;
+			float drawMs      = 0.0f;
 		};
 
 		PerfStats LastFrame() const { return m_LastFrame; }
-
-		// Rolling max over ~5 s of the per-stage measurements above.
 		PerfStats MaxLast5s() const;
 
 	private:
-		void CreateQuadMesh();
+		void CreateQuadGeometry();
 		void CreateInstanceBuffers();
+		void CreateUniformBuffer();
+		void CreatePipeline();
 		void DestroyGpuResources();
 
-		// Sort splats back-to-front relative to the camera and upload the
-		// reordered per-instance data to the GPU. Expensive (~50 ms for 1 M
-		// splats); caller is responsible for throttling.
 		void Sort(const glm::mat4& viewMatrix);
-
-		// Returns true if the camera has moved enough since the last sort
-		// that the visual ordering would drift. Used to trigger debounced
-		// re-sorts without wasting cycles on a static view.
 		bool NeedsResort(const glm::mat4& viewMatrix) const;
 
-		// GL handles. Held as uint32_t to avoid leaking <glad>/<GLES3> from
-		// this header into translation units that don't need them.
-		uint32_t m_Vao = 0;
-		uint32_t m_QuadVbo = 0;
-		uint32_t m_QuadEbo = 0;
+		WGPUContext* m_Ctx = nullptr;
 
-		uint32_t m_PosVbo     = 0;
-		uint32_t m_ScaleVbo   = 0;
-		uint32_t m_RotVbo     = 0;
-		uint32_t m_ColorVbo   = 0;
-		// Original splat index per draw-instance. Needed because the sorter
-		// reshuffles the other per-instance VBOs (pos/scale/rot/color) but
-		// the SH texture stays in file order; without this, the shader's
-		// `gl_InstanceID` lookup into the SH texture points to a different
-		// splat's view-dependent data after every sort. Only populated when
-		// SH is on.
-		uint32_t m_OrigIdxVbo = 0;
+		// Geometry: 4 corner verts, 6 indices per quad. Reused per instance.
+		WGPUBuffer m_QuadVerts = nullptr;
+		WGPUBuffer m_QuadIndices = nullptr;
 
-		// Optional SH texture for view-dependent colour. Only populated when
-		// the source file carried SH bands 1..3 (Inria .ply); antimatter15
-		// .splat datasets leave this at zero and the renderer uses the
-		// flat-colour shader variant.
-		//
-		// Layout: GL_RGBA32F, tiled so width × height fit within
-		// GL_MAX_TEXTURE_SIZE on both axes. Each splat occupies m_ShCoefCount
-		// contiguous texels starting at column (splatId % m_ShSplatsPerRow)
-		// * m_ShCoefCount on row (splatId / m_ShSplatsPerRow). Alpha channel
-		// is padding (RGB32F is not a guaranteed-required GL sampler format
-		// on every driver; RGBA32F is — Apple's GL 4.1 stack refuses to bind
-		// RGB32F to a float sampler).
-		uint32_t m_ShTex           = 0;
-		int      m_ShCoefCount     = 0;
-		int      m_ShSplatsPerRow  = 0;
-		bool     m_ShDisabled      = false;  // UI toggle, not asset property
+		// Per-instance attributes.
+		WGPUBuffer m_PosBuf   = nullptr;
+		WGPUBuffer m_ScaleBuf = nullptr;
+		WGPUBuffer m_RotBuf   = nullptr;
+		WGPUBuffer m_ColorBuf = nullptr;
 
-		// CPU-side copies of the original per-splat data, kept so the sorter
-		// can reorder rows without round-tripping through the GPU. These are
-		// also the source of truth for recomputing depths each sort pass.
+		// Camera uniform: view, proj, viewport. Layout matches the WGSL
+		// `Uniforms` struct in `gsplat.wgsl`.
+		WGPUBuffer            m_UniformBuf  = nullptr;
+		WGPUBindGroupLayout   m_BindLayout  = nullptr;
+		WGPUBindGroup         m_BindGroup   = nullptr;
+		WGPUPipelineLayout    m_PipeLayout  = nullptr;
+		WGPURenderPipeline    m_Pipeline    = nullptr;
+
+		// CPU mirrors for the sort path.
 		std::vector<glm::vec3>   m_Positions;
 		std::vector<glm::vec3>   m_Scales;
 		std::vector<glm::vec4>   m_Rotations;
 		std::vector<glm::u8vec4> m_Colors;
 
-		// Scratch storage for the permutation + per-sort reshuffle. Kept as
-		// members so we don't pay for alloc/free every sort.
+		// Sort scratch.
 		std::vector<uint32_t>    m_SortIndices;
-		std::vector<uint32_t>    m_ScratchU32;  // used to reshuffle orig-index
-		std::vector<uint32_t>    m_SortIndicesScratch;  // radix-sort ping-pong buffer
-		std::vector<uint32_t>    m_SortKeys;            // depths cast to sortable uint32
+		std::vector<uint32_t>    m_SortIndicesScratch;
+		std::vector<uint32_t>    m_SortKeys;
 		std::vector<uint32_t>    m_SortKeysScratch;
 		std::vector<glm::vec3>   m_ScratchVec3;
 		std::vector<glm::vec4>   m_ScratchVec4;
 		std::vector<glm::u8vec4> m_ScratchRgba;
 		std::vector<float>       m_Depths;
 
-		// Last view matrix used for sorting — NeedsResort() compares against
-		// the current view to decide whether the existing order is still
-		// good enough.
+		// Sort throttling state.
 		glm::mat4 m_LastSortView{1.0f};
 		bool      m_SortValid = false;
-
-		// Motion detection: sort runs only on the frame after the camera
-		// comes to rest. We keep the previous-frame view to diff against
-		// the current view, plus a boolean recording whether motion was
-		// observed last frame.
 		glm::mat4 m_LastObservedView{1.0f};
 		bool      m_WasMovingLastFrame = false;
 
 		size_t m_Count = 0;
 
-		// Timing buffers. We keep up to ~5 s of history at 60 fps ≈ 300 frames.
 		PerfStats              m_LastFrame;
 		std::vector<PerfStats> m_History;
 		size_t                 m_HistoryHead = 0;

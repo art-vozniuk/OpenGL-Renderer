@@ -1,12 +1,11 @@
 #pragma once
 
+// Legacy interface — pre-WebGPU port we had OpenGL/WebGL behind this. Kept
+// as an empty header so existing #include lines compile. The active GPU
+// context is now `WGPUContext`, owned by the Application.
+
 namespace Engine {
 
-	class GraphicsContext
-	{
-	public:
-		virtual void Init() = 0;
-		virtual void SwapBuffers() = 0;
-	};
+	// (intentionally empty; see Renderer/WGPUContext.h)
 
 }

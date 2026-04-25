@@ -2,16 +2,13 @@
 #include "Application.h"
 
 #include "Engine/Log.h"
-
 #include "Engine/Renderer/Renderer.h"
-
 #include "Input.h"
+#include "Platform/GLFW/GlfwWindow.h"
 
-#ifndef __EMSCRIPTEN__
 #include <GLFW/glfw3.h>
-#else
-#include <GLFW/glfw3.h>
-#include <emscripten/emscripten.h>
+#ifdef __EMSCRIPTEN__
+#  include <emscripten/emscripten.h>
 #endif
 
 namespace Engine {
@@ -26,34 +23,37 @@ namespace Engine {
 		m_Window = std::unique_ptr<Window>(Window::Create());
 		m_Window->SetEventCallback(BIND_EVENT_FN(Application::OnEvent));
 
-		Renderer::Init();
+		// Bring up WebGPU bound to the GLFW window. Static cast is safe —
+		// Window::Create only ever returns a GlfwWindow on the platforms we
+		// build for.
+		auto* glfwWindow = static_cast<GlfwWindow*>(m_Window.get())->GetNativeHandle();
+		const bool ok = m_Gfx.Init(glfwWindow,
+		                           m_Window->GetWidth(),
+		                           m_Window->GetHeight());
+		CORE_ASSERT(ok, "WGPUContext::Init failed");
 
-#ifndef __EMSCRIPTEN__
-		m_ImGuiLayer = new ImGuiLayer();
-		PushOverlay(m_ImGuiLayer);
-#endif
+		Renderer::Init(&m_Gfx);
 	}
 
-	void Application::PushLayer(Layer* layer)
+	Application::~Application()
 	{
-		m_LayerStack.PushLayer(layer);
+		Renderer::Shutdown();
+		m_Gfx.Shutdown();
 	}
 
-	void Application::PushOverlay(Layer* layer)
-	{
-		m_LayerStack.PushOverlay(layer);
-	}
+	void Application::PushLayer(Layer* layer)    { m_LayerStack.PushLayer(layer); }
+	void Application::PushOverlay(Layer* layer)  { m_LayerStack.PushOverlay(layer); }
 
 	void Application::OnEvent(Event& e)
 	{
 		EventDispatcher dispatcher(e);
 		dispatcher.Dispatch<WindowCloseEvent>(BIND_EVENT_FN(Application::OnWindowClose));
+		dispatcher.Dispatch<WindowResizeEvent>(BIND_EVENT_FN(Application::OnWindowResize));
 
 		for (auto it = m_LayerStack.end(); it != m_LayerStack.begin(); )
 		{
 			(*--it)->OnEvent(e);
-			if (e.Handled)
-				break;
+			if (e.Handled) break;
 		}
 	}
 
@@ -65,13 +65,6 @@ namespace Engine {
 
 		for (Layer* layer : m_LayerStack)
 			layer->OnUpdate(timestep);
-
-#ifndef __EMSCRIPTEN__
-		m_ImGuiLayer->Begin();
-		for (Layer* layer : m_LayerStack)
-			layer->OnImGuiRender();
-		m_ImGuiLayer->End();
-#endif
 
 		Input::OnUpdate();
 		m_Window->OnUpdate();
@@ -89,8 +82,6 @@ namespace Engine {
 	{
 		Input::Init();
 #ifdef __EMSCRIPTEN__
-		// Hand control to the browser — 0 fps means use requestAnimationFrame,
-		// simulate_infinite_loop=1 so main() doesn't return prematurely.
 		emscripten_set_main_loop_arg(EmscriptenMainLoop, this, 0, 1);
 #else
 		while (m_Running)
@@ -98,10 +89,16 @@ namespace Engine {
 #endif
 	}
 
-	bool Application::OnWindowClose(WindowCloseEvent& e)
+	bool Application::OnWindowClose(WindowCloseEvent&)
 	{
 		m_Running = false;
 		return true;
+	}
+
+	bool Application::OnWindowResize(WindowResizeEvent& e)
+	{
+		m_Gfx.OnResize(e.GetWidth(), e.GetHeight());
+		return false;
 	}
 
 }
