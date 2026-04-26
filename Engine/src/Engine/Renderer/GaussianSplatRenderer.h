@@ -181,15 +181,26 @@ namespace Engine {
 
 		// Track which idx buffer is "in" after the last sort pass, so the
 		// render bind group can use it as `sortedIndices`. After 4 passes
-		// it ends up in IdxPing again (4 swaps); after 2 passes ditto
-		// (2 swaps); both even counts return to ping.
+		// it ends up in IdxPing again.
 		bool m_FinalIsPing = true;
 
-		// Previous view matrix snapshot — used to detect "fast motion"
-		// frames where we drop sort precision from 32-bit (4 byte
-		// passes) to 16-bit (2 byte passes). Init to a NaN sentinel so
-		// the first frame always runs the full 4-pass sort.
-		glm::mat4 m_LastSortView = glm::mat4(std::numeric_limits<float>::quiet_NaN());
+		// Sort-on-stop scheduling (mobile only). Defers sort during
+		// camera motion — render uses the previous frame's ordering —
+		// then runs once when the camera transitions from moving to
+		// idle, so the resting frame is crisp. Lets the mobile GPU
+		// stay below the thermal-throttle ceiling during free-fly
+		// instead of paying the 20-ms sort pipeline every frame.
+		//
+		// Toggled at construction time based on (pointer: coarse) +
+		// optional ?sort_on_stop=force|never URL override.
+		bool      m_SortOnStopOnly = false;
+		// View we saw on the previous frame (regardless of whether we
+		// sorted at it). Detects motion: m_LastViewSeen != current.
+		glm::mat4 m_LastViewSeen   = glm::mat4(std::numeric_limits<float>::quiet_NaN());
+		// View matching the last sort we actually ran. Detects "we
+		// stopped moving but our sort is still stale": current view ==
+		// m_LastViewSeen but != m_LastSortedView.
+		glm::mat4 m_LastSortedView = glm::mat4(std::numeric_limits<float>::quiet_NaN());
 
 		size_t m_Count = 0;
 

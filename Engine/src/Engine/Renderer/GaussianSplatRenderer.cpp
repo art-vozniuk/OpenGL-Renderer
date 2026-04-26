@@ -8,6 +8,10 @@
 #include <cstring>
 #include <filesystem>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
+
 #include <glm/gtc/type_ptr.hpp>
 
 namespace Engine {
@@ -71,6 +75,30 @@ namespace Engine {
 	GaussianSplatRenderer::GaussianSplatRenderer(WGPUContext& ctx)
 		: m_Ctx(&ctx)
 	{
+		// Sort-on-stop policy is on by default for touch-primary
+		// devices (mobile / tablet). Desktop with a coarse-pointer
+		// device is rare, but even there the policy is a no-op when
+		// the camera moves continuously. URL override lets us flip
+		// the behaviour for testing on any device:
+		//   ?sort_on_stop=force  → always on
+		//   ?sort_on_stop=never  → always off (sort every frame)
+	#ifdef __EMSCRIPTEN__
+		m_SortOnStopOnly = (EM_ASM_INT({
+			try {
+				var p = new URLSearchParams(window.location.search || '');
+				var f = p.get('sort_on_stop');
+				if (f === 'force') return 1;
+				if (f === 'never') return 0;
+				return (window.matchMedia &&
+				        window.matchMedia('(pointer: coarse)').matches) ? 1 : 0;
+			} catch (e) { return 0; }
+		})) != 0;
+	#else
+		m_SortOnStopOnly = false;
+	#endif
+		INFO_CORE("gsplat: sort-on-stop = {0}",
+		          m_SortOnStopOnly ? "enabled (mobile)" : "disabled (desktop)");
+
 		CreateUniformBuffer();
 		CreateSortResources();
 		CreatePipelines();
@@ -514,6 +542,38 @@ namespace Engine {
 	{
 		if (m_Count == 0) return;
 
+		// Sort-on-stop scheduling (mobile only). State machine:
+		//   moving frame:        skip sort entirely (use prev ordering)
+		//   first idle frame:    sort once (resting frame is crisp)
+		//   subsequent idle:     skip sort (already done)
+		// First-ever frame (NaN sentinel) always falls through to sort
+		// so sortedIndices + indirect-args are seeded.
+		if (m_SortOnStopOnly) {
+			const bool firstFrame = std::isnan(m_LastSortedView[0][0]);
+			if (firstFrame) {
+				m_LastViewSeen   = viewMatrix;
+				m_LastSortedView = viewMatrix;
+				// fall through and sort
+			} else if (viewMatrix != m_LastViewSeen) {
+				// Camera moved — defer. Render uses prev frame's
+				// sortedIndices + indirect-args as-is.
+				m_LastViewSeen = viewMatrix;
+				// Push 0 into the metric so the perf overlay reflects
+				// the actual GPU work this frame (no sort dispatched).
+				m_Metrics.gpuSortMs.Push(0.0f);
+				return;
+			} else if (m_LastViewSeen == m_LastSortedView) {
+				// Stayed idle and our last sort matches the current
+				// view — nothing to do.
+				m_Metrics.gpuSortMs.Push(0.0f);
+				return;
+			} else {
+				// Just transitioned moving → idle. Sort once.
+				m_LastSortedView = viewMatrix;
+				// fall through and sort
+			}
+		}
+
 		const uint32_t numWg = ((uint32_t)m_Count + 255u) / 256u;
 
 		// Frustum planes from the view-projection matrix (Gribb-Hartmann).
@@ -665,46 +725,12 @@ namespace Engine {
 			                 isLast ? sortEndTw : nullptr);
 		};
 
-		// Adaptive sort precision: drop to 16-bit (only top 2 bytes)
-		// when the camera is moving fast. The visual artefact is
-		// "items with the same upper-16-bit-of-depth are in arbitrary
-		// order within their group" — invisible during pan, only the
-		// lowest-significance ordering noise. Once the user stops
-		// moving the next frame falls back to 4-pass full precision
-		// for a crisp resting frame.
-		//
-		// Threshold: any non-trivial camera change. We compare the
-		// view matrix's translation column + forward axis to detect
-		// motion. NaN-sentinel m_LastSortView starts everyone at "no
-		// motion known" — first real comparison after that decides.
-		bool moving = false;
-		if (!std::isnan(m_LastSortView[0][0])) {
-			// Frobenius norm of (view - lastView). 0.005 ≈ a couple
-			// of camera-units per second at 60 fps; below that the
-			// ordering refresh is more important than the perf win.
-			float diffSq = 0.0f;
-			for (int c = 0; c < 4; ++c)
-				for (int r = 0; r < 4; ++r) {
-					const float d = viewMatrix[c][r] - m_LastSortView[c][r];
-					diffSq += d * d;
-				}
-			moving = diffSq > 0.0001f * 0.0001f; // |Δ| > 1e-4
-		}
-		m_LastSortView = viewMatrix;
+		OnePass(kSortConfigPass0, false);
+		OnePass(kSortConfigPass1, false);
+		OnePass(kSortConfigPass2, false);
+		OnePass(kSortConfigPass3, true);
 
-		if (moving) {
-			// 16-bit precision: skip the two low-byte passes. After 2
-			// swaps we're back at idxPing, same as the 4-pass case.
-			OnePass(kSortConfigPass2, false);
-			OnePass(kSortConfigPass3, true);
-		} else {
-			OnePass(kSortConfigPass0, false);
-			OnePass(kSortConfigPass1, false);
-			OnePass(kSortConfigPass2, false);
-			OnePass(kSortConfigPass3, true);
-		}
-
-		m_FinalIsPing = true;  // even number of swaps -> back to IdxPing
+		m_FinalIsPing = true;  // 4 swaps -> back to IdxPing
 	}
 
 
