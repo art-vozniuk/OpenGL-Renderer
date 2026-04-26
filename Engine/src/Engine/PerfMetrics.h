@@ -85,7 +85,10 @@ namespace Engine {
 		void Emit() const
 		{
 		#ifdef __EMSCRIPTEN__
-			char buf[720];
+		#ifndef RENDERER_GIT_HASH
+		#  define RENDERER_GIT_HASH "unknown"
+		#endif
+			char buf[760];
 			std::snprintf(
 				buf, sizeof(buf),
 				"{\"type\":\"perf\","
@@ -95,7 +98,8 @@ namespace Engine {
 				"\"gpuRender\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f},"
 				"\"gpuTotal\":{\"cur\":%.2f,\"avg\":%.2f,\"max\":%.2f},"
 				"\"camEye\":[%.2f,%.2f,%.2f],"
-				"\"splats\":%d,\"gpuValid\":%s}",
+				"\"splats\":%d,\"gpuValid\":%s,"
+				"\"version\":\"%s\"}",
 				frameMs.Current(),     frameMs.Avg(),     frameMs.Max(),
 				cpuEncodeMs.Current(), cpuEncodeMs.Avg(), cpuEncodeMs.Max(),
 				gpuSortMs.Current(),   gpuSortMs.Avg(),   gpuSortMs.Max(),
@@ -103,7 +107,8 @@ namespace Engine {
 				gpuTotalMs.Current(),  gpuTotalMs.Avg(),  gpuTotalMs.Max(),
 				camEye[0], camEye[1], camEye[2],
 				splatCount,
-				gpuTimingsValid ? "true" : "false");
+				gpuTimingsValid ? "true" : "false",
+				RENDERER_GIT_HASH);
 
 			EM_ASM({
 				try {

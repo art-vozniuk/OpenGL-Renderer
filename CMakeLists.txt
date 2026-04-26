@@ -123,6 +123,23 @@ file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS
 
 add_library(Engine STATIC ${ENGINE_SOURCES})
 
+# Bake the renderer's git short-sha into the binary so the perf overlay
+# can show "build 750d32d" — invaluable when the user uploads a log
+# and we want to know which prod build it came from. Captured at CMake
+# configure time; CI's clean checkout always runs configure, so this
+# stays fresh on every deploy. Local dev sees a slightly-stale tag if
+# they don't re-run cmake — acceptable.
+execute_process(
+    COMMAND git -C ${CMAKE_CURRENT_SOURCE_DIR} rev-parse --short=7 HEAD
+    OUTPUT_VARIABLE RENDERER_GIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT RENDERER_GIT_HASH)
+    set(RENDERER_GIT_HASH "unknown")
+endif()
+message(STATUS "Renderer git hash: ${RENDERER_GIT_HASH}")
+
 target_include_directories(Engine
     PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/Engine/src"
@@ -142,6 +159,7 @@ if(NOT EMSCRIPTEN)
             ENGINE_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
             GLFW_INCLUDE_NONE
             GLM_FORCE_DEPTH_ZERO_TO_ONE
+            RENDERER_GIT_HASH="${RENDERER_GIT_HASH}"
             $<$<CONFIG:Debug>:DEBUG>
             $<$<NOT:$<CONFIG:Debug>>:RELEASE>
     )
@@ -150,6 +168,7 @@ else()
         PUBLIC
             ENGINE_ASSETS_DIR="/assets"
             GLM_FORCE_DEPTH_ZERO_TO_ONE
+            RENDERER_GIT_HASH="${RENDERER_GIT_HASH}"
             $<$<CONFIG:Debug>:DEBUG>
             $<$<NOT:$<CONFIG:Debug>>:RELEASE>
             # Disable spdlog/fmt char8_t — it triggers a missing
