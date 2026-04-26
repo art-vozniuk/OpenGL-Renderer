@@ -542,35 +542,39 @@ namespace Engine {
 	{
 		if (m_Count == 0) return;
 
-		// Sort-on-stop scheduling (mobile only). State machine:
-		//   moving frame:        skip sort entirely (use prev ordering)
-		//   first idle frame:    sort once (resting frame is crisp)
-		//   subsequent idle:     skip sort (already done)
-		// First-ever frame (NaN sentinel) always falls through to sort
-		// so sortedIndices + indirect-args are seeded.
+		// Sort-on-stop scheduling (mobile only). Decide whether to run
+		// the four 5-dispatch byte passes (the expensive part) this
+		// frame. Visibility refresh + draw-arg copy ALWAYS run — the
+		// cull pass (cs_init_depth) decides which splats are on screen
+		// and that has to track the live camera, otherwise newly-revealed
+		// regions render as a black void while the camera pans.
+		// State machine:
+		//   first frame:     sort (seed sortedIndices)
+		//   moving frame:    skip byte passes (idxPing has visible
+		//                    splats in atomic-add order; render gets
+		//                    them un-depth-sorted, slightly smeared
+		//                    alpha — same trade-off the WebGL version
+		//                    accepted)
+		//   first idle frame after motion: sort (crisp resting frame)
+		//   subsequent idle: skip byte passes (sort still valid)
+		bool shouldSort = true;
 		if (m_SortOnStopOnly) {
 			const bool firstFrame = std::isnan(m_LastSortedView[0][0]);
 			if (firstFrame) {
 				m_LastViewSeen   = viewMatrix;
 				m_LastSortedView = viewMatrix;
-				// fall through and sort
+				shouldSort = true;
 			} else if (viewMatrix != m_LastViewSeen) {
-				// Camera moved — defer. Render uses prev frame's
-				// sortedIndices + indirect-args as-is.
+				// Camera moved — defer the byte passes.
 				m_LastViewSeen = viewMatrix;
-				// Push 0 into the metric so the perf overlay reflects
-				// the actual GPU work this frame (no sort dispatched).
-				m_Metrics.gpuSortMs.Push(0.0f);
-				return;
+				shouldSort = false;
 			} else if (m_LastViewSeen == m_LastSortedView) {
-				// Stayed idle and our last sort matches the current
-				// view — nothing to do.
-				m_Metrics.gpuSortMs.Push(0.0f);
-				return;
+				// Stayed idle, ordering already matches this view.
+				shouldSort = false;
 			} else {
-				// Just transitioned moving → idle. Sort once.
+				// Moving → idle transition.
 				m_LastSortedView = viewMatrix;
-				// fall through and sort
+				shouldSort = true;
 			}
 		}
 
@@ -725,12 +729,19 @@ namespace Engine {
 			                 isLast ? sortEndTw : nullptr);
 		};
 
-		OnePass(kSortConfigPass0, false);
-		OnePass(kSortConfigPass1, false);
-		OnePass(kSortConfigPass2, false);
-		OnePass(kSortConfigPass3, true);
+		if (shouldSort) {
+			OnePass(kSortConfigPass0, false);
+			OnePass(kSortConfigPass1, false);
+			OnePass(kSortConfigPass2, false);
+			OnePass(kSortConfigPass3, true);
+		} else {
+			// No byte passes ran. Sort metric isn't going to be
+			// updated by the async timestamp readback for this frame,
+			// so push 0 directly so the perf overlay tells the truth.
+			m_Metrics.gpuSortMs.Push(0.0f);
+		}
 
-		m_FinalIsPing = true;  // 4 swaps -> back to IdxPing
+		m_FinalIsPing = true;  // 4 swaps (or 0) -> back to IdxPing
 	}
 
 
