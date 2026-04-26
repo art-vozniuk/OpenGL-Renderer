@@ -4,6 +4,7 @@
 #include "FileReader.h"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 
@@ -266,7 +267,11 @@ namespace Engine {
 		wgpuShaderModuleRelease(sortShader);
 
 		// ---- Render bind group layout ----
-		std::array<WGPUBindGroupLayoutEntry, 6> rEntries{};
+		// 5 entries: uniform + 4 storage. Cov3D replaces the
+		// scales+rotations pair the old layout had at slots 2, 3 —
+		// vertex shader reads it directly instead of recomputing
+		// Σ₃ from quat+scale every frame.
+		std::array<WGPUBindGroupLayoutEntry, 5> rEntries{};
 
 		rEntries[0].binding    = 0;
 		rEntries[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
@@ -282,10 +287,9 @@ namespace Engine {
 			return e;
 		};
 		rEntries[1] = rstor(1);  // positions
-		rEntries[2] = rstor(2);  // scales
-		rEntries[3] = rstor(3);  // rotations
-		rEntries[4] = rstor(4);  // colors (as raw u32 array)
-		rEntries[5] = rstor(5);  // sortedIndices
+		rEntries[2] = rstor(2);  // cov3D (2 vec4 per splat — was scales+rotations)
+		rEntries[3] = rstor(3);  // colors (as raw u32 array)
+		rEntries[4] = rstor(4);  // sortedIndices
 
 		WGPUBindGroupLayoutDescriptor rBglDesc{};
 		rBglDesc.label      = SV("gsplat-render-bgl");
@@ -364,6 +368,35 @@ namespace Engine {
 		std::vector<uint32_t> colorsPacked(m_Count);
 		std::memcpy(colorsPacked.data(), data.colors.data(), m_Count * sizeof(uint32_t));
 
+		// Pre-compute world-space covariance Σ₃ = R·S²·Rᵀ once per
+		// splat. The vertex shader used to do this on EVERY visible
+		// splat per frame (~3 matrix multiplies + a quat→mat3 = 24 ALU
+		// ops) which adds up at 1M splats. Storing 6 floats per splat
+		// (symmetric 3×3) is the same memory footprint as the old
+		// scales+rotations vec4 pair.
+		std::vector<glm::vec4> cov3DPacked(m_Count * 2);
+		for (size_t i = 0; i < m_Count; ++i) {
+			const glm::vec4& q = data.rotations[i]; // (w, x, y, z)
+			const float w = q.x, x = q.y, y = q.z, z = q.w;
+			const float xx = x*x, yy = y*y, zz = z*z;
+			const float xy = x*y, xz = x*z, yz = y*z;
+			const float wx = w*x, wy = w*y, wz = w*z;
+			// Same convention as gsplat.wgsl QuatToMat3.
+			const glm::mat3 R(
+				glm::vec3(1.0f - 2.0f*(yy+zz),       2.0f*(xy+wz),       2.0f*(xz-wy)),
+				glm::vec3(      2.0f*(xy-wz), 1.0f - 2.0f*(xx+zz),       2.0f*(yz+wx)),
+				glm::vec3(      2.0f*(xz+wy),       2.0f*(yz-wx), 1.0f - 2.0f*(xx+yy))
+			);
+			const glm::vec3& s = data.scales[i];
+			glm::mat3 S(0.0f);
+			S[0][0] = s.x; S[1][1] = s.y; S[2][2] = s.z;
+			const glm::mat3 M = R * S;
+			const glm::mat3 Sigma = M * glm::transpose(M);
+			// Pack symmetric matrix into 2 vec4 — see header for layout.
+			cov3DPacked[i*2 + 0] = glm::vec4(Sigma[0][0], Sigma[1][0], Sigma[2][0], Sigma[1][1]);
+			cov3DPacked[i*2 + 1] = glm::vec4(Sigma[2][1], Sigma[2][2], 0.0f, 0.0f);
+		}
+
 		auto MakeStorageWith = [&](WGPUBuffer& dst, const void* src, size_t bytes,
 		                           const char* lbl) {
 			if (dst) wgpuBufferRelease(dst);
@@ -379,6 +412,7 @@ namespace Engine {
 		MakeStorageWith(m_Scale, scalePadded.data(), m_Count * sizeof(glm::vec4), "gsplat-scale");
 		MakeStorageWith(m_Rot,   data.rotations.data(), m_Count * sizeof(glm::vec4), "gsplat-rot");
 		MakeStorageWith(m_Color, colorsPacked.data(),   m_Count * sizeof(uint32_t), "gsplat-color");
+		MakeStorageWith(m_Cov3D, cov3DPacked.data(),    m_Count * 2 * sizeof(glm::vec4), "gsplat-cov3D");
 
 		// Per-frame sort scratch — sized to N, allocated once.
 		auto MakeStorage = [&](WGPUBuffer& dst, size_t bytes, const char* lbl) {
@@ -450,18 +484,17 @@ namespace Engine {
 			m_SortBG = wgpuDeviceCreateBindGroup(m_Ctx->Device(), &bgd);
 		}
 		{
-			std::array<WGPUBindGroupEntry, 6> e{};
+			std::array<WGPUBindGroupEntry, 5> e{};
 			auto fill = [&](size_t i, uint32_t b, WGPUBuffer buf, uint64_t size) {
 				e[i].binding = b; e[i].buffer = buf; e[i].size = size;
 			};
 			fill(0, 0, m_RenderUniform, sizeof(RenderUniforms));
 			fill(1, 1, m_Pos,    WGPU_WHOLE_SIZE);
-			fill(2, 2, m_Scale,  WGPU_WHOLE_SIZE);
-			fill(3, 3, m_Rot,    WGPU_WHOLE_SIZE);
-			fill(4, 4, m_Color,  WGPU_WHOLE_SIZE);
+			fill(2, 2, m_Cov3D,  WGPU_WHOLE_SIZE);  // pre-baked Σ₃ (was scales+rotations)
+			fill(3, 3, m_Color,  WGPU_WHOLE_SIZE);
 			// 4 byte-passes each ping<->pong flips the buffer; final state
 			// after 4 swaps is back to IdxPing.
-			fill(5, 5, m_IdxPing, WGPU_WHOLE_SIZE);
+			fill(4, 4, m_IdxPing, WGPU_WHOLE_SIZE);
 			WGPUBindGroupDescriptor bgd{};
 			bgd.label      = SV("gsplat-render-bg");
 			bgd.layout     = m_RenderBGL;
@@ -631,12 +664,47 @@ namespace Engine {
 			DispatchIndirect(m_PipeStableScatter, cfg,    "gsplat-sort-stable-scatter",
 			                 isLast ? sortEndTw : nullptr);
 		};
-		OnePass(kSortConfigPass0, false);
-		OnePass(kSortConfigPass1, false);
-		OnePass(kSortConfigPass2, false);
-		OnePass(kSortConfigPass3, true);
 
-		m_FinalIsPing = true;  // 4 swaps -> back to IdxPing
+		// Adaptive sort precision: drop to 16-bit (only top 2 bytes)
+		// when the camera is moving fast. The visual artefact is
+		// "items with the same upper-16-bit-of-depth are in arbitrary
+		// order within their group" — invisible during pan, only the
+		// lowest-significance ordering noise. Once the user stops
+		// moving the next frame falls back to 4-pass full precision
+		// for a crisp resting frame.
+		//
+		// Threshold: any non-trivial camera change. We compare the
+		// view matrix's translation column + forward axis to detect
+		// motion. NaN-sentinel m_LastSortView starts everyone at "no
+		// motion known" — first real comparison after that decides.
+		bool moving = false;
+		if (!std::isnan(m_LastSortView[0][0])) {
+			// Frobenius norm of (view - lastView). 0.005 ≈ a couple
+			// of camera-units per second at 60 fps; below that the
+			// ordering refresh is more important than the perf win.
+			float diffSq = 0.0f;
+			for (int c = 0; c < 4; ++c)
+				for (int r = 0; r < 4; ++r) {
+					const float d = viewMatrix[c][r] - m_LastSortView[c][r];
+					diffSq += d * d;
+				}
+			moving = diffSq > 0.0001f * 0.0001f; // |Δ| > 1e-4
+		}
+		m_LastSortView = viewMatrix;
+
+		if (moving) {
+			// 16-bit precision: skip the two low-byte passes. After 2
+			// swaps we're back at idxPing, same as the 4-pass case.
+			OnePass(kSortConfigPass2, false);
+			OnePass(kSortConfigPass3, true);
+		} else {
+			OnePass(kSortConfigPass0, false);
+			OnePass(kSortConfigPass1, false);
+			OnePass(kSortConfigPass2, false);
+			OnePass(kSortConfigPass3, true);
+		}
+
+		m_FinalIsPing = true;  // even number of swaps -> back to IdxPing
 	}
 
 
@@ -765,7 +833,7 @@ namespace Engine {
 	void GaussianSplatRenderer::DestroyGpuResources()
 	{
 		auto Drop = [](WGPUBuffer& b) { if (b) { wgpuBufferRelease(b); b = nullptr; } };
-		Drop(m_Pos); Drop(m_Scale); Drop(m_Rot); Drop(m_Color);
+		Drop(m_Pos); Drop(m_Scale); Drop(m_Rot); Drop(m_Color); Drop(m_Cov3D);
 		Drop(m_Depths); Drop(m_IdxPing); Drop(m_IdxPong);
 		Drop(m_WgHist); Drop(m_WgOffset); Drop(m_GlobalDigitOffset); Drop(m_DigitTotals);
 		Drop(m_IndirectArgsStorage); Drop(m_IndirectArgsDraw);

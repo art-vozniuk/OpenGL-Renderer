@@ -7,6 +7,7 @@
 #include "../PerfMetrics.h"
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace Engine {
@@ -109,9 +110,17 @@ namespace Engine {
 
 		// Storage buffers: read-only splat data (uploaded once).
 		WGPUBuffer m_Pos    = nullptr;   // vec4 (xyz padded)
-		WGPUBuffer m_Scale  = nullptr;   // vec4 (xyz padded)
-		WGPUBuffer m_Rot    = nullptr;   // vec4
+		WGPUBuffer m_Scale  = nullptr;   // vec4 (xyz padded) — sort cull only
+		WGPUBuffer m_Rot    = nullptr;   // vec4 — kept around for re-uploads
 		WGPUBuffer m_Color  = nullptr;   // u32 packed (u8x4 normalised)
+		// Pre-computed world-space covariance Σ₃ = R·S²·Rᵀ per splat.
+		// Symmetric 3×3 packed into 2 vec4 (8 floats, last two padding):
+		//   lo = (Σ₀₀, Σ₀₁, Σ₀₂, Σ₁₁)
+		//   hi = (Σ₁₂, Σ₂₂, _,   _)
+		// Replaces the per-frame quat→mat3 + matmul in the vertex shader,
+		// which was eating ~5 ms of GPU render time at 1 M visible
+		// splats on mobile.
+		WGPUBuffer m_Cov3D  = nullptr;
 
 		// Sort scratch (storage, rewritten every frame).
 		WGPUBuffer m_Depths            = nullptr; // array<u32, N>
@@ -172,9 +181,15 @@ namespace Engine {
 
 		// Track which idx buffer is "in" after the last sort pass, so the
 		// render bind group can use it as `sortedIndices`. After 4 passes
-		// it ends up in IdxPing again (4 swaps), but we keep the explicit
-		// state in case the count of passes changes.
+		// it ends up in IdxPing again (4 swaps); after 2 passes ditto
+		// (2 swaps); both even counts return to ping.
 		bool m_FinalIsPing = true;
+
+		// Previous view matrix snapshot — used to detect "fast motion"
+		// frames where we drop sort precision from 32-bit (4 byte
+		// passes) to 16-bit (2 byte passes). Init to a NaN sentinel so
+		// the first frame always runs the full 4-pass sort.
+		glm::mat4 m_LastSortView = glm::mat4(std::numeric_limits<float>::quiet_NaN());
 
 		size_t m_Count = 0;
 

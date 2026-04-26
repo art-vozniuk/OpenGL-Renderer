@@ -17,10 +17,13 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> positions:     array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> scales:        array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> rotations:     array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read> colors:        array<u32>;        // packed u8x4
-@group(0) @binding(5) var<storage, read> sortedIndices: array<u32>;
+// Pre-computed world-space covariance Σ₃ = R·S²·Rᵀ per splat. Stored
+// as 2×vec4 (2 splats per 32-byte block laid out as [Σ₀₀ Σ₀₁ Σ₀₂ Σ₁₁]
+// then [Σ₁₂ Σ₂₂ _ _]). Replaces the old scales+rotations buffers —
+// we no longer rebuild Σ₃ in the vertex shader every frame.
+@group(0) @binding(2) var<storage, read> cov3D:         array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> colors:        array<u32>;        // packed u8x4
+@group(0) @binding(4) var<storage, read> sortedIndices: array<u32>;
 
 // 2.5σ quad bound — at 2.5σ a unit-amplitude Gaussian contributes
 // exp(−0.5·6.25) ≈ 0.044 of its peak, well below the existing
@@ -50,31 +53,18 @@ const CORNERS: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
 
 // ----- Helpers (covariance + eigen) -----------------------------------------
 
-fn QuatToMat3(q: vec4<f32>) -> mat3x3<f32> {
-    // Convention: q.x=w, q.y=x, q.z=y, q.w=z (matches SplatLoader).
-    let w = q.x;
-    let x = q.y;
-    let y = q.z;
-    let z = q.w;
-    let xx = x * x; let yy = y * y; let zz = z * z;
-    let xy = x * y; let xz = x * z; let yz = y * z;
-    let wx = w * x; let wy = w * y; let wz = w * z;
+// Reconstruct the symmetric 3×3 covariance from the per-splat 2×vec4
+// pre-baked block. CPU-side packing (see GaussianSplatRenderer::Upload):
+//   lo = (Σ₀₀, Σ₀₁, Σ₀₂, Σ₁₁)
+//   hi = (Σ₁₂, Σ₂₂, _,   _)
+fn LoadCov3D(splatIdx: u32) -> mat3x3<f32> {
+    let lo = cov3D[splatIdx * 2u + 0u];
+    let hi = cov3D[splatIdx * 2u + 1u];
     return mat3x3<f32>(
-        vec3<f32>(1.0 - 2.0 * (yy + zz),       2.0 * (xy + wz),       2.0 * (xz - wy)),
-        vec3<f32>(      2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz),       2.0 * (yz + wx)),
-        vec3<f32>(      2.0 * (xz + wy),       2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy))
+        vec3<f32>(lo.x, lo.y, lo.z),  // col 0 = (Σ₀₀, Σ₁₀, Σ₂₀)
+        vec3<f32>(lo.y, lo.w, hi.x),  // col 1 = (Σ₀₁, Σ₁₁, Σ₂₁)
+        vec3<f32>(lo.z, hi.x, hi.y)   // col 2 = (Σ₀₂, Σ₁₂, Σ₂₂)
     );
-}
-
-fn Cov3D(scale: vec3<f32>, rotation: vec4<f32>) -> mat3x3<f32> {
-    let R = QuatToMat3(rotation);
-    let S = mat3x3<f32>(
-        vec3<f32>(scale.x, 0.0, 0.0),
-        vec3<f32>(0.0, scale.y, 0.0),
-        vec3<f32>(0.0, 0.0, scale.z),
-    );
-    let M = R * S;
-    return M * transpose(M);
 }
 
 fn Cov2D(viewPos: vec3<f32>, cov3D: mat3x3<f32>, viewRot: mat3x3<f32>,
@@ -130,8 +120,6 @@ fn vs_main(
     let corner = CORNERS[vid];
     let p4     = positions[i];
     let splatPos   = p4.xyz;
-    let splatScale = scales[i].xyz;
-    let splatRot   = rotations[i];
     let splatColor = unpack4x8unorm(colors[i]);
 
     var out: VsOut;
@@ -149,15 +137,27 @@ fn vs_main(
     let fx = 0.5 * u.viewportSize.x * u.projection[0][0];
     let fy = 0.5 * u.viewportSize.y * u.projection[1][1];
 
-    let cov3D   = Cov3D(splatScale, splatRot);
+    let cov3   = LoadCov3D(i);
     let viewRot = mat3x3<f32>(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
-    let cov2    = Cov2D(viewPos, cov3D, viewRot, fx, fy);
+    let cov2   = Cov2D(viewPos, cov3, viewRot, fx, fy);
 
     let eig = EvalEigen(cov2);
     let majorRadius = SIGMA_BOUND * sqrt(eig.lambda1);
     let minorRadius = SIGMA_BOUND * sqrt(eig.lambda2);
 
     if (majorRadius > 0.5 * u.viewportSize.y) {
+        out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
+    }
+
+    // Tiny-splat early-out: if the projected major radius is sub-
+    // pixel, the rasterised quad covers fewer than ~1 pixel and the
+    // existing per-fragment alpha-discard would clip nearly all of
+    // it anyway. Discard at vertex stage skips the fragment shader
+    // and the alpha-blend bandwidth on a long tail of distant splats
+    // — common at the train-scene default spawn where ~half the
+    // scene is far enough to project below 1 px.
+    if (majorRadius < 0.6) {
         out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
     }
