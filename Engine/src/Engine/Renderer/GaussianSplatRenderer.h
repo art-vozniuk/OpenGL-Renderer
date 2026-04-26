@@ -168,7 +168,8 @@ namespace Engine {
 
 		// Compute pipelines (one per WGSL entry point).
 		WGPUComputePipeline m_PipeClearIndirect   = nullptr;
-		WGPUComputePipeline m_PipeInit            = nullptr;
+		WGPUComputePipeline m_PipeInit            = nullptr;  // cs_init_depth (compact)
+		WGPUComputePipeline m_PipeInitIdentity    = nullptr;  // cs_init_identity (mobile)
 		WGPUComputePipeline m_PipeFinalizeArgs    = nullptr;
 		WGPUComputePipeline m_PipeClearWgHist     = nullptr;
 		WGPUComputePipeline m_PipeWgHist          = nullptr;

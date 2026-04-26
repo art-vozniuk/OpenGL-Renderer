@@ -175,6 +175,50 @@ fn cs_finalize_args(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 
+// Sort-on-stop / mobile path: identity-permutation init.
+// Writes idxPing[i] = i + depths[i] = key for ALL N splats (no
+// frustum cull, no atomic compaction). Thread 0 also seeds the
+// indirect-args block with instanceCount = N + dispatch wgX = numWg
+// so the byte passes operate over the full range.
+//
+// Why no compaction here: with sort-on-stop the byte passes only
+// run on the moving→idle transition. During the moving frames we
+// skip EncodeSort entirely and let the render reuse the last
+// sorted idxPing as-is. If init_depth had compacted the array each
+// frame, that previous ordering would be blown away by the atomic
+// adds, and rendering would see garbage-ordered splats. Keeping
+// identity + all-N preserves the last sort across frames; the
+// vertex shader's existing frustum / behind-camera / sub-pixel
+// early-outs handle off-screen splats per-vertex.
+@compute @workgroup_size(WG)
+fn cs_init_identity(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i == 0u) {
+        atomicStore(&indirectArgs[0], 6u);     // vertexCount
+        atomicStore(&indirectArgs[1], u.N);    // instanceCount = all splats
+        atomicStore(&indirectArgs[2], 0u);     // firstVertex
+        atomicStore(&indirectArgs[3], 0u);     // firstInstance
+        atomicStore(&indirectArgs[4], u.numWg); // dispatch wgX
+        atomicStore(&indirectArgs[5], 1u);     // wgY
+        atomicStore(&indirectArgs[6], 1u);     // wgZ
+    }
+    if (i >= u.N) { return; }
+
+    idxPing[i] = i;
+
+    let p = positions[i].xyz;
+    let z = u.viewRow2.x * p.x + u.viewRow2.y * p.y + u.viewRow2.z * p.z + u.viewRow2.w;
+    let bits = bitcast<u32>(z);
+    var key: u32;
+    if ((bits & 0x80000000u) != 0u) {
+        key = ~bits;
+    } else {
+        key = bits ^ 0x80000000u;
+    }
+    depths[i] = key;
+}
+
+
 // Zero the [num_wg * 256] per-workgroup histogram array between byte passes.
 @compute @workgroup_size(WG)
 fn cs_clear_wg_hist(@builtin(global_invocation_id) gid: vec3<u32>) {

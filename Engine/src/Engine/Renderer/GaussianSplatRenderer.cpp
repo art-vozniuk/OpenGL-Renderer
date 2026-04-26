@@ -286,6 +286,7 @@ namespace Engine {
 		};
 		m_PipeClearIndirect    = MakeCompute("cs_clear_indirect",    "gsplat-cs-clear-indirect");
 		m_PipeInit             = MakeCompute("cs_init_depth",        "gsplat-cs-init");
+		m_PipeInitIdentity     = MakeCompute("cs_init_identity",     "gsplat-cs-init-identity");
 		m_PipeFinalizeArgs     = MakeCompute("cs_finalize_args",     "gsplat-cs-finalize-args");
 		m_PipeClearWgHist      = MakeCompute("cs_clear_wg_hist",     "gsplat-cs-clear-wghist");
 		m_PipeWgHist           = MakeCompute("cs_wg_hist",           "gsplat-cs-wghist");
@@ -542,21 +543,28 @@ namespace Engine {
 	{
 		if (m_Count == 0) return;
 
-		// Sort-on-stop scheduling (mobile only). Decide whether to run
-		// the four 5-dispatch byte passes (the expensive part) this
-		// frame. Visibility refresh + draw-arg copy ALWAYS run — the
-		// cull pass (cs_init_depth) decides which splats are on screen
-		// and that has to track the live camera, otherwise newly-revealed
-		// regions render as a black void while the camera pans.
-		// State machine:
-		//   first frame:     sort (seed sortedIndices)
-		//   moving frame:    skip byte passes (idxPing has visible
-		//                    splats in atomic-add order; render gets
-		//                    them un-depth-sorted, slightly smeared
-		//                    alpha — same trade-off the WebGL version
-		//                    accepted)
-		//   first idle frame after motion: sort (crisp resting frame)
-		//   subsequent idle: skip byte passes (sort still valid)
+		// Sort-on-stop scheduling (mobile only).
+		//
+		// State machine — decides whether the byte passes run this
+		// frame:
+		//   first frame:                    sort (seed sortedIndices)
+		//   moving frame:                   skip everything (preserve
+		//                                   last sort's idxPing as-is)
+		//   first idle frame after motion:  sort (crisp resting frame)
+		//   subsequent idle:                skip
+		//
+		// Mobile path uses an IDENTITY init (cs_init_identity) — all
+		// N splats land in idxPing every sort, no compaction. The
+		// vertex shader's per-vertex frustum + behind-camera +
+		// sub-pixel cull handles off-screen splats. Compaction is
+		// incompatible with sort-on-stop because it rewrites idxPing
+		// every frame, blowing away the previous sort's ordering and
+		// turning motion frames into garbage-ordered alpha
+		// composites.
+		//
+		// Desktop path (m_SortOnStopOnly == false) keeps the
+		// compaction + sort-every-frame pipeline — strong GPUs
+		// benefit from the smaller sort + fewer draw instances.
 		bool shouldSort = true;
 		if (m_SortOnStopOnly) {
 			const bool firstFrame = std::isnan(m_LastSortedView[0][0]);
@@ -565,17 +573,23 @@ namespace Engine {
 				m_LastSortedView = viewMatrix;
 				shouldSort = true;
 			} else if (viewMatrix != m_LastViewSeen) {
-				// Camera moved — defer the byte passes.
 				m_LastViewSeen = viewMatrix;
 				shouldSort = false;
 			} else if (m_LastViewSeen == m_LastSortedView) {
-				// Stayed idle, ordering already matches this view.
 				shouldSort = false;
 			} else {
-				// Moving → idle transition.
 				m_LastSortedView = viewMatrix;
 				shouldSort = true;
 			}
+		}
+
+		if (!shouldSort) {
+			// Mobile, motion or idle-after-stable: nothing to do.
+			// idxPing + indirectArgsDraw retain values from the last
+			// sort (identity perm + sorted N items). Render reads
+			// them as-is; per-vertex cull handles off-screen splats.
+			m_Metrics.gpuSortMs.Push(0.0f);
+			return;
 		}
 
 		const uint32_t numWg = ((uint32_t)m_Count + 255u) / 256u;
@@ -694,15 +708,24 @@ namespace Engine {
 		const auto* sortBeginTw = m_TimestampsEnabled ? &m_SortBeginTimestampWrites : nullptr;
 		const auto* sortEndTw   = m_TimestampsEnabled ? &m_SortEndTimestampWrites   : nullptr;
 
-		// Frame-start setup: zero the indirect-draw + dispatch-args
-		// buffers, frustum-cull + compact, then translate the visible
-		// counter into compute-dispatch-indirect args. After this
-		// block the storage variant of the indirect-args buffer holds
-		// the final values; copy them into the Indirect-flagged twin
-		// before the byte passes consume it.
-		Dispatch(m_PipeClearIndirect, kSortConfigInit, 1, "gsplat-clear-indirect");
-		Dispatch(m_PipeInit,          kSortConfigInit, wgN, "gsplat-sort-init", sortBeginTw);
-		Dispatch(m_PipeFinalizeArgs,  kSortConfigInit, 1, "gsplat-finalize-args");
+		// Frame-start setup. Two modes:
+		//   - mobile (sort-on-stop): identity init + all-N. One
+		//     dispatch (cs_init_identity) handles depth keys, idxPing
+		//     identity perm, AND seeds the indirect-args block with
+		//     instanceCount=N + dispatch wgX=numWg.
+		//   - desktop: clear → cull/compact → finalize.  Three
+		//     dispatches total before the copy step.
+		// Either way the storage→draw copy at the end pushes the
+		// finalised args into the Indirect-flagged twin before the
+		// byte passes (and DrawIndirect later) consume it.
+		if (m_SortOnStopOnly) {
+			Dispatch(m_PipeInitIdentity, kSortConfigInit, wgN,
+			         "gsplat-sort-init-identity", sortBeginTw);
+		} else {
+			Dispatch(m_PipeClearIndirect, kSortConfigInit, 1, "gsplat-clear-indirect");
+			Dispatch(m_PipeInit,          kSortConfigInit, wgN, "gsplat-sort-init", sortBeginTw);
+			Dispatch(m_PipeFinalizeArgs,  kSortConfigInit, 1, "gsplat-finalize-args");
+		}
 
 		wgpuCommandEncoderCopyBufferToBuffer(
 			encoder,
@@ -729,19 +752,12 @@ namespace Engine {
 			                 isLast ? sortEndTw : nullptr);
 		};
 
-		if (shouldSort) {
-			OnePass(kSortConfigPass0, false);
-			OnePass(kSortConfigPass1, false);
-			OnePass(kSortConfigPass2, false);
-			OnePass(kSortConfigPass3, true);
-		} else {
-			// No byte passes ran. Sort metric isn't going to be
-			// updated by the async timestamp readback for this frame,
-			// so push 0 directly so the perf overlay tells the truth.
-			m_Metrics.gpuSortMs.Push(0.0f);
-		}
+		OnePass(kSortConfigPass0, false);
+		OnePass(kSortConfigPass1, false);
+		OnePass(kSortConfigPass2, false);
+		OnePass(kSortConfigPass3, true);
 
-		m_FinalIsPing = true;  // 4 swaps (or 0) -> back to IdxPing
+		m_FinalIsPing = true;  // 4 swaps -> back to IdxPing
 	}
 
 
@@ -879,6 +895,7 @@ namespace Engine {
 		if (m_PipeClearIndirect) { wgpuComputePipelineRelease(m_PipeClearIndirect); m_PipeClearIndirect = nullptr; }
 		if (m_PipeFinalizeArgs)  { wgpuComputePipelineRelease(m_PipeFinalizeArgs);  m_PipeFinalizeArgs  = nullptr; }
 		if (m_PipeInit)          { wgpuComputePipelineRelease(m_PipeInit);          m_PipeInit          = nullptr; }
+		if (m_PipeInitIdentity)  { wgpuComputePipelineRelease(m_PipeInitIdentity);  m_PipeInitIdentity  = nullptr; }
 		if (m_PipeClearWgHist)   { wgpuComputePipelineRelease(m_PipeClearWgHist);   m_PipeClearWgHist   = nullptr; }
 		if (m_PipeWgHist)        { wgpuComputePipelineRelease(m_PipeWgHist);        m_PipeWgHist        = nullptr; }
 		if (m_PipeColumnScan)      { wgpuComputePipelineRelease(m_PipeColumnScan);      m_PipeColumnScan      = nullptr; }
