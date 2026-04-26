@@ -43,6 +43,34 @@ import pathlib
 # Python f-strings require `{{ }}` for literal braces, which is a common
 # footgun.
 
+HEAD_SCRIPT_PATCH = """<script>
+// DPR cap for touch devices.
+// Mobile screens commonly report DPR 2.5–3, which means a 360-CSS-px
+// viewport renders into a 1080-physical-px backbuffer. Splat scenes are
+// fragment-bound on those phones — overdraw + tile bandwidth dominate
+// frame time. Capping DPR at 2 cuts the pixel count ~2.25× on a 3-DPR
+// device with no perceptible visual loss at typical viewing distance.
+//
+// Has to run BEFORE the emscripten contrib.glfw3 port reads
+// devicePixelRatio for its canvas-size logic — head script, not body.
+// ?force_dpr=N forces a specific cap (e.g. 1.5 for harsher tests).
+(function () {
+  try {
+    var coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+    var params = new URLSearchParams(window.location.search || '');
+    var force  = parseFloat(params.get('force_dpr') || '');
+    if (!coarse && !isFinite(force)) return;
+    var capped = isFinite(force) ? force : 2.0;
+    var real   = window.devicePixelRatio;
+    if (capped >= real) return;
+    Object.defineProperty(window, 'devicePixelRatio', {
+      configurable: true,
+      get: function () { return capped; }
+    });
+  } catch (e) {}
+})();
+</script>"""
+
 STYLE_PATCH = """<style>
 #emscripten_logo, .spinner, #status, #progress, #controls, #output { display: none !important; }
 .emscripten_border { border: none !important; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; background: transparent; }
@@ -342,7 +370,11 @@ def patch(html_path: pathlib.Path) -> None:
     tag = build_tag()
     script = SCRIPT_PATCH.replace("__BUILD_TAG__", tag)
 
-    html = html.replace("</head>", STYLE_PATCH + "\n</head>", 1)
+    # Order matters: HEAD_SCRIPT_PATCH must execute before emscripten
+    # GLFW reads window.devicePixelRatio. Both go before </head>; the
+    # script is appended first so it lands before the </head> close,
+    # ahead of the body's Sandbox.js include.
+    html = html.replace("</head>", HEAD_SCRIPT_PATCH + "\n" + STYLE_PATCH + "\n</head>", 1)
     html = html.replace("</body>", script + "\n</body>", 1)
 
     html_path.write_text(html, encoding="utf-8")
