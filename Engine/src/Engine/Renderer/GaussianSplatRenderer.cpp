@@ -708,24 +708,26 @@ namespace Engine {
 		const auto* sortBeginTw = m_TimestampsEnabled ? &m_SortBeginTimestampWrites : nullptr;
 		const auto* sortEndTw   = m_TimestampsEnabled ? &m_SortEndTimestampWrites   : nullptr;
 
-		// Frame-start setup. Two modes:
-		//   - mobile (sort-on-stop): identity init + all-N. One
-		//     dispatch (cs_init_identity) handles depth keys, idxPing
-		//     identity perm, AND seeds the indirect-args block with
-		//     instanceCount=N + dispatch wgX=numWg.
-		//   - desktop: clear → cull/compact → finalize.  Three
-		//     dispatches total before the copy step.
-		// Either way the storage→draw copy at the end pushes the
-		// finalised args into the Indirect-flagged twin before the
-		// byte passes (and DrawIndirect later) consume it.
-		if (m_SortOnStopOnly) {
-			Dispatch(m_PipeInitIdentity, kSortConfigInit, wgN,
-			         "gsplat-sort-init-identity", sortBeginTw);
-		} else {
-			Dispatch(m_PipeClearIndirect, kSortConfigInit, 1, "gsplat-clear-indirect");
-			Dispatch(m_PipeInit,          kSortConfigInit, wgN, "gsplat-sort-init", sortBeginTw);
-			Dispatch(m_PipeFinalizeArgs,  kSortConfigInit, 1, "gsplat-finalize-args");
-		}
+		// Frame-start setup: identity init writes depth keys + a
+		// deterministic identity permutation in idxPing, plus seeds
+		// the indirect-args block (instanceCount=N, dispatch wgX).
+		//
+		// We used to have a "compact" path that frustum-culled here
+		// and atomic-compacted only the visible splats into idxPing,
+		// shrinking the sort + render workload. That path was
+		// non-deterministic — atomicAdd ordering varies frame-to-
+		// frame, so consecutive frames at a fixed view ended up with
+		// different idxPing layouts, and items sharing a depth key
+		// composited in different orders → visible flicker on dense
+		// scenes (room.splat with 1.5M splats made it obvious).
+		//
+		// Identity init is bit-stable across frames, so the stable
+		// radix that follows produces bit-identical output for a
+		// fixed view. Render pays full-N VS cost on desktop, but
+		// desktop has plenty of headroom; mobile already used this
+		// path (sort-on-stop relies on it for cross-frame stability).
+		Dispatch(m_PipeInitIdentity, kSortConfigInit, wgN,
+		         "gsplat-sort-init", sortBeginTw);
 
 		wgpuCommandEncoderCopyBufferToBuffer(
 			encoder,
