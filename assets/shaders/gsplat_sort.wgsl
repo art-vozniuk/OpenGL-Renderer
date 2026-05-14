@@ -279,6 +279,13 @@ fn cs_wg_hist(@builtin(global_invocation_id) gid: vec3<u32>,
 // Replaces the previous single-thread O(numWg * 256) scan that was the
 // frame budget killer (sat at ~400 ms / frame for 1M splats).
 const SCAN_WG: u32 = 256u;
+// chunk fits up to MAX_CHUNK entries per thread => supports
+// numWg <= SCAN_WG * MAX_CHUNK = 256 * 64 = 16384 workgroups,
+// i.e. up to ~4M splats. ml-sharp at 1536² internal grid emits
+// ~2M+ gaussians; catalog scenes sit under 1M. Past 4M splats
+// the radix scan silently corrupts wgOffset → sort scatter
+// collisions → per-frame flicker.
+const MAX_CHUNK: u32 = 64u;
 var<workgroup> sScan: array<u32, SCAN_WG>;
 
 @compute @workgroup_size(SCAN_WG)
@@ -286,12 +293,11 @@ fn cs_column_scan(@builtin(workgroup_id) wgid: vec3<u32>,
                   @builtin(local_invocation_index) lid: u32) {
     let d    = wgid.x;
     let base = d * u.numWg;
-    // chunk capped at 16 -> works as long as numWg <= 4096 (1 M splats).
     let chunk = (u.numWg + SCAN_WG - 1u) / SCAN_WG;
 
     // Read chunk entries, build per-thread exclusive prefix into `local`.
     var prefix: u32 = 0u;
-    var local: array<u32, 16>;
+    var local: array<u32, MAX_CHUNK>;
     for (var k: u32 = 0u; k < chunk; k = k + 1u) {
         let i = lid * chunk + k;
         var v: u32 = 0u;
