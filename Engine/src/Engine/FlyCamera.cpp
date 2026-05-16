@@ -5,7 +5,7 @@
 #include "VirtualInput.h"
 
 #ifdef __EMSCRIPTEN__
-constexpr float maxMoveSpeed = 1.f;
+constexpr float maxMoveSpeed = 4.f;
 #else
 constexpr float maxMoveSpeed = 5000.f;
 #endif

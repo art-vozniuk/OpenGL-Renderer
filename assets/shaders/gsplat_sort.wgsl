@@ -279,12 +279,10 @@ fn cs_wg_hist(@builtin(global_invocation_id) gid: vec3<u32>,
 // Replaces the previous single-thread O(numWg * 256) scan that was the
 // frame budget killer (sat at ~400 ms / frame for 1M splats).
 const SCAN_WG: u32 = 256u;
-// chunk fits up to MAX_CHUNK entries per thread => supports
-// numWg <= SCAN_WG * MAX_CHUNK = 256 * 64 = 16384 workgroups,
-// i.e. up to ~4M splats. ml-sharp at 1536² internal grid emits
-// ~2M+ gaussians; catalog scenes sit under 1M. Past 4M splats
-// the radix scan silently corrupts wgOffset → sort scatter
-// collisions → per-frame flicker.
+// Per-thread chunk capacity for the column scan. With SCAN_WG=256
+// this caps numWg at 256 * MAX_CHUNK = 16384 workgroups (~4M splats).
+// Overflowing it silently corrupts wgOffset and the stable-scatter
+// writes collide non-deterministically — flicker on a fixed view.
 const MAX_CHUNK: u32 = 64u;
 var<workgroup> sScan: array<u32, SCAN_WG>;
 

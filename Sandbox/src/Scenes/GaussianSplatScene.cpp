@@ -189,7 +189,7 @@ namespace Sandbox {
 		INFO_CORE("gsplat spawn: eye=({0},{1},{2}) fwd=({3},{4},{5})",
 		          eye.x, eye.y, eye.z, fwd.x, fwd.y, fwd.z);
 		m_Camera.SetTransform(glm::inverse(glm::lookAt(eye, eye + fwd, glm::vec3(0.0f, 1.0f, 0.0f))));
-		m_Camera.m_MoveSpeed = 1.0f;
+		m_Camera.m_MoveSpeed = 4.0f;
 
 		m_Splats = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
 		m_Splats->Upload(data);
