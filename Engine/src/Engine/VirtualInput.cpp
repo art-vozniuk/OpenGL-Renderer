@@ -28,6 +28,13 @@ namespace Engine {
 		return d;
 	}
 
+	int ConsumeRequestedMode()
+	{
+		const int m = g_state.requestedMode;
+		g_state.requestedMode = -1;
+		return m;
+	}
+
 }
 
 
@@ -60,6 +67,13 @@ extern "C" {
 	{
 		auto& s = Engine::GetVirtualInput();
 		s.zoomDelta += delta;
+	}
+
+	// 0 = orbit, 1 = fly. Out-of-range values are ignored by the scene.
+	VINPUT_EXPORT void vinput_request_mode(int mode)
+	{
+		auto& s = Engine::GetVirtualInput();
+		s.requestedMode = mode;
 	}
 
 }

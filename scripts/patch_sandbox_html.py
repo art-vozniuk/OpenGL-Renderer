@@ -136,10 +136,12 @@ SCRIPT_PATCH = """<script>
 
 <script>
 (function () {
-  // Touch + pinch driver for OrbitCamera. 1-finger drag → orbit yaw/pitch;
-  // 2-finger pinch → zoom. Forwarded to C++ via Module.ccall. Desktop
-  // mouse drag + scroll wheel are handled directly inside OrbitCamera via
-  // Input::* (GLFW emscripten port), so we don't shim them here.
+  // Touch + pinch driver for OrbitCamera. 1-finger drag → orbit
+  // yaw/pitch; 2-finger pinch → zoom. Forwarded to C++ via Module.ccall.
+  // Desktop mouse drag + scroll wheel are handled directly inside
+  // OrbitCamera via Input::* (GLFW emscripten port), so we don't shim
+  // them here. The same JS bridge also relays camera-mode requests from
+  // the parent (orbit/fly toggle button) into vinput_request_mode.
   //
   // Native builds never load this file (this is in Sandbox.html which is
   // emscripten-only output).
@@ -244,6 +246,19 @@ SCRIPT_PATCH = """<script>
   }
   document.addEventListener('touchend',    dropTouches);
   document.addEventListener('touchcancel', dropTouches);
+
+  // Camera-mode request from the parent (orbit/fly toggle in React).
+  // {type:'set-camera-mode', mode: 0|1} → C++ scene polls and switches.
+  // Mode changes (including the C++ auto-switch on WASDEQ) are echoed
+  // back to the parent from scene code via 'camera-mode-changed'.
+  window.addEventListener('message', function (e) {
+    var data = e && e.data;
+    if (!data || data.type !== 'set-camera-mode') return;
+    var mode = data.mode;
+    if (mode !== 0 && mode !== 1) return;
+    if (!isReady()) return;
+    Module.ccall('vinput_request_mode', null, ['number'], [mode]);
+  });
 })();
 </script>"""
 

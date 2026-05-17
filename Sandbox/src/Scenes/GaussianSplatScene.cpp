@@ -3,9 +3,12 @@
 #include "../SceneSelector.h"
 
 #include "Engine/Application.h"
+#include "Engine/Input.h"
+#include "Engine/KeyCodes.h"
 #include "Engine/Log.h"
 #include "Engine/Renderer/Renderer.h"
 #include "Engine/Renderer/SplatLoader.h"
+#include "Engine/VirtualInput.h"
 
 #include <GLFW/glfw3.h>
 #include <filesystem>
@@ -150,9 +153,9 @@ namespace Sandbox {
 	GaussianSplatScene::GaussianSplatScene(float screenWidth, float screenHeight)
 		: SceneBase("gsplat", screenWidth, screenHeight)
 	{
-		m_Camera.SetPerspective(glm::radians(45.0f),
-		                        m_ScreenWidth / m_ScreenHeight,
-		                        0.1f, 10000.0f);
+		const float aspect = m_ScreenWidth / m_ScreenHeight;
+		m_OrbitCam.SetPerspective(glm::radians(45.0f), aspect, 0.1f, 10000.0f);
+		m_FlyCam  .SetPerspective(glm::radians(45.0f), aspect, 0.1f, 10000.0f);
 
 		const std::string source = ResolveSceneSource();
 
@@ -211,7 +214,7 @@ namespace Sandbox {
 
 		INFO_CORE("gsplat spawn: eye=({0},{1},{2}) target=({3},{4},{5})",
 		          eye.x, eye.y, eye.z, target.x, target.y, target.z);
-		m_Camera.SetOrbit(target, eye);
+		m_OrbitCam.SetOrbit(target, eye);
 
 		m_Splats = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
 		m_Splats->Upload(data);
@@ -226,7 +229,33 @@ namespace Sandbox {
 
 	void GaussianSplatScene::OnUpdate(Timestep ts)
 	{
-		m_Camera.Update(ts);
+		// --- Camera mode arbitration. ---------------------------------------
+		// JS-requested mode (toolbar click) wins; otherwise pressing any
+		// fly key while in orbit auto-switches to fly so the user can just
+		// "press W and go".
+		const int requested = ConsumeRequestedMode();
+		if (requested == 0) {
+			SetMode(CameraMode::Orbit);
+		} else if (requested == 1) {
+			SetMode(CameraMode::Fly);
+		} else if (m_Mode == CameraMode::Orbit && AnyFlyKeyPressed()) {
+			SetMode(CameraMode::Fly);
+		}
+
+		if (m_Mode == CameraMode::Orbit) {
+			m_OrbitCam.Update(ts);
+		} else {
+			// Drop any touch/pinch state accumulated by the JS bridge so it
+			// doesn't snap back into orbit on mode switch.
+			float discardYaw, discardPitch;
+			ConsumeOrbitDeltas(discardYaw, discardPitch);
+			(void)ConsumeZoomDelta();
+			m_FlyCam.Update(ts);
+		}
+
+		const SPtr<Camera> activeRenderCam = (m_Mode == CameraMode::Orbit)
+		    ? m_OrbitCam.GetRenderCamera()
+		    : m_FlyCam  .GetRenderCamera();
 
 		// Frame-interval sample (CPU wallclock between scene tick starts).
 		// Captured before any encoding work so it reflects the user-visible
@@ -242,7 +271,7 @@ namespace Sandbox {
 		// metrics ring before we schedule the next round.
 		if (m_Splats) m_Splats->TickPerf();
 
-		if (!Renderer::BeginScene(m_Camera.GetRenderCamera())) {
+		if (!Renderer::BeginScene(activeRenderCam)) {
 			return;
 		}
 
@@ -252,9 +281,8 @@ namespace Sandbox {
 		// re-sorting is just one buffer rewrite, not the bulk reshuffle
 		// the GL renderer used to do.
 		const double encodeStart = glfwGetTime();
-		const auto& cam = m_Camera.GetRenderCamera();
-		const glm::mat4& view = cam->GetViewMatrix();
-		const glm::mat4& proj = cam->GetProjectionMatrix();
+		const glm::mat4& view = activeRenderCam->GetViewMatrix();
+		const glm::mat4& proj = activeRenderCam->GetProjectionMatrix();
 		if (m_Splats) m_Splats->EncodeSort(Renderer::Encoder(), view, proj);
 
 		const WGPUPassTimestampWrites* renderTw =
@@ -262,7 +290,7 @@ namespace Sandbox {
 		Renderer::OpenColorPass(0.05f, 0.05f, 0.08f, 1.0f, renderTw);
 		if (m_Splats) {
 			m_Splats->EncodeRender(Renderer::CurrentPass(),
-			                       m_Camera.GetRenderCamera(),
+			                       activeRenderCam,
 			                       glm::vec2(m_ScreenWidth, m_ScreenHeight));
 		}
 
@@ -282,7 +310,9 @@ namespace Sandbox {
 			auto& m = m_Splats->Metrics();
 			m.cpuEncodeMs.Push(static_cast<float>((encodeEnd - encodeStart) * 1000.0));
 			m.splatCount = static_cast<int>(m_SplatCount);
-			const glm::vec3 eye = m_Camera.GetPosition();
+			const glm::vec3 eye = (m_Mode == CameraMode::Orbit)
+			    ? m_OrbitCam.GetPosition()
+			    : m_FlyCam  .GetPosition();
 			m.camEye[0] = eye.x;
 			m.camEye[1] = eye.y;
 			m.camEye[2] = eye.z;
@@ -302,7 +332,9 @@ namespace Sandbox {
 			// Periodic camera-pose dump so an interactive native session can
 			// fly to a pleasing angle and read off the eye/fwd values for
 			// the DB seed (camera_eye / camera_fwd columns).
-			const glm::mat4& t = m_Camera.GetTransform();
+			const glm::mat4& t = (m_Mode == CameraMode::Orbit)
+			    ? m_OrbitCam.GetTransform()
+			    : m_FlyCam  .GetTransform();
 			const glm::vec3 e = glm::vec3(t[3]);
 			const glm::vec3 f = -glm::vec3(t[2]);
 			INFO_CORE("gsplat camera: eye=({0:.3f},{1:.3f},{2:.3f}) fwd=({3:.3f},{4:.3f},{5:.3f})",
@@ -324,6 +356,44 @@ namespace Sandbox {
 
 		Renderer::EndScene();
 	}
+
+
+	bool GaussianSplatScene::AnyFlyKeyPressed() const
+	{
+		return Input::IsKeyPressed(KEY_W) || Input::IsKeyPressed(KEY_A)
+		    || Input::IsKeyPressed(KEY_S) || Input::IsKeyPressed(KEY_D)
+		    || Input::IsKeyPressed(KEY_Q) || Input::IsKeyPressed(KEY_E);
+	}
+
+
+	void GaussianSplatScene::SetMode(CameraMode mode)
+	{
+		if (mode == m_Mode) return;
+
+		// No view jump on either transition.
+		//   Orbit → fly: drop fly camera into the orbit pose.
+		//   Fly → orbit: re-pivot orbit around a point in front of the
+		//     fly camera at the previous orbit radius — user orbits
+		//     around whatever they aimed at, not the auto-framed centroid.
+		if (mode == CameraMode::Fly) {
+			const glm::vec3 eye = m_OrbitCam.GetPosition();
+			m_FlyCam.SetPose(eye, m_OrbitCam.GetTarget() - eye);
+		} else {
+			const glm::vec3 eye    = m_FlyCam.GetPosition();
+			const glm::vec3 fwd    = m_FlyCam.GetForward();
+			const float     radius = m_OrbitCam.GetRadius();
+			m_OrbitCam.SetOrbit(eye + fwd * radius, eye);
+		}
+
+		m_Mode = mode;
+
+	#ifdef __EMSCRIPTEN__
+		PostSplatMessage(mode == CameraMode::Orbit
+		    ? "{\"type\":\"camera-mode-changed\",\"mode\":\"orbit\"}"
+		    : "{\"type\":\"camera-mode-changed\",\"mode\":\"fly\"}");
+	#endif
+	}
+
 
 	SCENE_REGISTER("gsplat", GaussianSplatScene)
 

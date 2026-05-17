@@ -236,8 +236,9 @@ if(RENDERER_BUILD_SANDBOX)
             -sEXPORTED_RUNTIME_METHODS=cwrap,ccall
             # JS bridge for touch + pinch input: vinput_apply_orbit feeds
             # 1-finger drag yaw/pitch deltas into OrbitCamera;
-            # vinput_apply_zoom feeds pinch + scroll-on-touch zoom deltas.
-            -sEXPORTED_FUNCTIONS=_main,_vinput_apply_orbit,_vinput_apply_zoom
+            # vinput_apply_zoom feeds pinch + scroll-on-touch zoom deltas;
+            # vinput_request_mode toggles orbit/fly camera from the React UI.
+            -sEXPORTED_FUNCTIONS=_main,_vinput_apply_orbit,_vinput_apply_zoom,_vinput_request_mode
             -sASSERTIONS=1
         )
         target_compile_options(Sandbox PRIVATE

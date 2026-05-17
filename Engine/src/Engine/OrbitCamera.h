@@ -44,6 +44,8 @@ namespace Engine {
 		void SetOrbit(const glm::vec3& target, const glm::vec3& eye);
 
 		glm::vec3 GetPosition(void) const { return glm::vec3(m_Transform[3]); }
+		glm::vec3 GetTarget(void)   const { return m_Target; }
+		float     GetRadius(void)   const { return m_Radius; }
 		const glm::mat4& GetTransform(void) const { return m_Transform; }
 		const SPtr<Camera> GetRenderCamera(void) const { return m_Camera; }
 

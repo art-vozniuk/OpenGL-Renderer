@@ -25,6 +25,11 @@ namespace Engine {
 		float orbitYaw   = 0.0f;  // accumulated, in degrees
 		float orbitPitch = 0.0f;  // accumulated, in degrees
 		float zoomDelta  = 0.0f;  // accumulated, log-radius units (positive = zoom out)
+
+		// Latched camera-mode request from JS. -1 = no change since last
+		// consume; 0 = orbit, 1 = fly. The scene polls + resets it once
+		// per frame.
+		int requestedMode = -1;
 	};
 
 	VirtualInputState& GetVirtualInput();
@@ -33,5 +38,9 @@ namespace Engine {
 	// by OrbitCamera::Update.
 	void ConsumeOrbitDeltas(float& outYaw, float& outPitch);
 	float ConsumeZoomDelta();
+
+	// Returns -1 if no mode change was requested since the last call,
+	// 0 (orbit) or 1 (fly) otherwise. Resets the flag.
+	int ConsumeRequestedMode();
 
 }
