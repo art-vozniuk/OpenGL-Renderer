@@ -234,10 +234,10 @@ if(RENDERER_BUILD_SANDBOX)
             -sSTACK_SIZE=5242880          # 5 MB
             --preload-file ${ASSETS_DIR}@/assets
             -sEXPORTED_RUNTIME_METHODS=cwrap,ccall
-            # JS bridge for the on-screen mobile joysticks: vinput_set_move
-            # holds the left-stick vector + Q/E buttons; vinput_apply_look
-            # accumulates right-stick swipe deltas.
-            -sEXPORTED_FUNCTIONS=_main,_vinput_set_move,_vinput_apply_look
+            # JS bridge for touch + pinch input: vinput_apply_orbit feeds
+            # 1-finger drag yaw/pitch deltas into OrbitCamera;
+            # vinput_apply_zoom feeds pinch + scroll-on-touch zoom deltas.
+            -sEXPORTED_FUNCTIONS=_main,_vinput_apply_orbit,_vinput_apply_zoom
             -sASSERTIONS=1
         )
         target_compile_options(Sandbox PRIVATE

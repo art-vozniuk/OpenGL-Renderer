@@ -13,12 +13,19 @@ namespace Engine {
 
 	VirtualInputState& GetVirtualInput() { return g_state; }
 
-	void ConsumeLookDeltas(float& outYaw, float& outPitch)
+	void ConsumeOrbitDeltas(float& outYaw, float& outPitch)
 	{
-		outYaw   = g_state.lookYaw;
-		outPitch = g_state.lookPitch;
-		g_state.lookYaw   = 0.0f;
-		g_state.lookPitch = 0.0f;
+		outYaw   = g_state.orbitYaw;
+		outPitch = g_state.orbitPitch;
+		g_state.orbitYaw   = 0.0f;
+		g_state.orbitPitch = 0.0f;
+	}
+
+	float ConsumeZoomDelta()
+	{
+		const float d = g_state.zoomDelta;
+		g_state.zoomDelta = 0.0f;
+		return d;
 	}
 
 }
@@ -42,19 +49,17 @@ namespace Engine {
 
 extern "C" {
 
-	VINPUT_EXPORT void vinput_set_move(float x, float y, float z)
+	VINPUT_EXPORT void vinput_apply_orbit(float yawDelta, float pitchDelta)
 	{
 		auto& s = Engine::GetVirtualInput();
-		s.move.x = x;
-		s.move.y = y;
-		s.move.z = z;
+		s.orbitYaw   += yawDelta;
+		s.orbitPitch += pitchDelta;
 	}
 
-	VINPUT_EXPORT void vinput_apply_look(float yawDelta, float pitchDelta)
+	VINPUT_EXPORT void vinput_apply_zoom(float delta)
 	{
 		auto& s = Engine::GetVirtualInput();
-		s.lookYaw   += yawDelta;
-		s.lookPitch += pitchDelta;
+		s.zoomDelta += delta;
 	}
 
 }

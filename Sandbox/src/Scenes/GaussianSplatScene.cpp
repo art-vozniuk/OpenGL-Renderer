@@ -186,10 +186,32 @@ namespace Sandbox {
 			if (auto v = ParseVec3(*s); v) fwd = glm::normalize(*v);
 		}
 
-		INFO_CORE("gsplat spawn: eye=({0},{1},{2}) fwd=({3},{4},{5})",
-		          eye.x, eye.y, eye.z, fwd.x, fwd.y, fwd.z);
-		m_Camera.SetTransform(glm::inverse(glm::lookAt(eye, eye + fwd, glm::vec3(0.0f, 1.0f, 0.0f))));
-		m_Camera.m_MoveSpeed = 4.0f;
+		// Orbit target = robust centroid of the loaded splats. We compute
+		// it after parsing the file (positions in `data.positions`) so the
+		// orbit pivot matches the actual subject regardless of which
+		// scene-specific eye/fwd was passed. Filter by alpha to drop the
+		// transparent halo gaussians that drag the mean off-subject.
+		glm::vec3 target(0.0f);
+		{
+			glm::dvec3 sum(0.0);
+			size_t kept = 0;
+			for (size_t i = 0; i < data.positions.size(); ++i) {
+				if (data.colors[i].a >= 32) {  // ≈ 12% sigmoid; same threshold as auto_frame_camera
+					sum += glm::dvec3(data.positions[i]);
+					++kept;
+				}
+			}
+			if (kept == 0) {
+				// Fallback: all alphas low (degenerate scene). Use unfiltered mean.
+				for (const auto& p : data.positions) sum += glm::dvec3(p);
+				kept = std::max<size_t>(1, data.positions.size());
+			}
+			target = glm::vec3(sum / static_cast<double>(kept));
+		}
+
+		INFO_CORE("gsplat spawn: eye=({0},{1},{2}) target=({3},{4},{5})",
+		          eye.x, eye.y, eye.z, target.x, target.y, target.z);
+		m_Camera.SetOrbit(target, eye);
 
 		m_Splats = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
 		m_Splats->Upload(data);

@@ -2,7 +2,7 @@
 
 #include "SceneBase.h"
 
-#include "Engine/FlyCamera.h"
+#include "Engine/OrbitCamera.h"
 #include "Engine/Renderer/GaussianSplatRenderer.h"
 
 #include <memory>
@@ -14,7 +14,9 @@ namespace Sandbox {
 	 *
 	 * Single-asset scene: loads an antimatter15 .splat file and drives
 	 * the GS renderer (per-frame GPU sort + indirected draw). Camera is
-	 * a simple WASD fly camera.
+	 * an OrbitCamera anchored at the splat-data centroid — touch / mouse
+	 * drag orbits, scroll / pinch zooms; soft-elastic limits snap back
+	 * to the auto-framed pose.
 	 */
 	class GaussianSplatScene final : public SceneBase
 	{
@@ -24,7 +26,7 @@ namespace Sandbox {
 		void OnUpdate(Engine::Timestep ts) override;
 
 	private:
-		Engine::FlyCamera m_Camera;
+		Engine::OrbitCamera m_Camera;
 		std::unique_ptr<Engine::GaussianSplatRenderer> m_Splats;
 		size_t m_SplatCount   = 0;
 		int    m_FrameCount   = 0;

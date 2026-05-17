@@ -74,27 +74,8 @@ HEAD_SCRIPT_PATCH = """<script>
 STYLE_PATCH = """<style>
 #emscripten_logo, .spinner, #status, #progress, #controls, #output { display: none !important; }
 .emscripten_border { border: none !important; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; background: transparent; }
-canvas.emscripten { max-width: 100vw !important; max-height: 100vh !important; width: auto !important; height: auto !important; display: block; object-fit: contain; outline: none !important; }
+canvas.emscripten { max-width: 100vw !important; max-height: 100vh !important; width: auto !important; height: auto !important; display: block; object-fit: contain; outline: none !important; touch-action: none; }
 body { margin: 0; overflow: hidden; background: transparent; }
-
-/* On-screen joystick UI for touch devices.
- * Hidden by default; the patched <script> below shows the .mobile-controls
- * root only when (pointer: coarse) is true. Two stick zones in the bottom
- * corners + a vertical Q/E button column in the centre. Z-indexed above
- * the canvas so finger drags hit the joystick first. */
-.mobile-controls { display: none; position: fixed; inset: 0; pointer-events: none; z-index: 10; touch-action: none; }
-.mobile-controls .stick-zone { position: absolute; bottom: 5vh; width: 35vw; max-width: 200px; height: 35vw; max-height: 200px; pointer-events: auto; }
-.mobile-controls .stick-zone.left  { left: 4vw; }
-.mobile-controls .stick-zone.right { right: 4vw; }
-.mobile-controls .stick-base { position: absolute; inset: 0; border-radius: 50%; background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.25); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
-.mobile-controls .stick-knob { position: absolute; top: 50%; left: 50%; width: 40%; height: 40%; margin: -20% 0 0 -20%; border-radius: 50%; background: rgba(255,255,255,0.4); border: 1px solid rgba(255,255,255,0.6); transform: translate(0, 0); will-change: transform; touch-action: none; }
-.mobile-controls .vbtn-col { position: absolute; left: 50%; bottom: 5vh; transform: translateX(-50%); display: flex; flex-direction: column; gap: 12px; pointer-events: auto; }
-.mobile-controls .vbtn { width: 56px; height: 56px; border-radius: 50%; background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.25); color: rgba(255,255,255,0.9); font-size: 22px; font-weight: 600; display: flex; align-items: center; justify-content: center; user-select: none; -webkit-user-select: none; touch-action: none; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
-.mobile-controls .vbtn.active { background: rgba(255,255,255,0.3); }
-/* Visibility is gated by JS adding .enabled (it makes that decision based on
- * pointer:coarse + ?force_mobile= override). No @media wrapper here — if JS
- * is disabled, the controls stay hidden either way. */
-.mobile-controls.enabled { display: block !important; }
 </style>"""
 
 # The setStatus hook posts messages whose `type` the React wrapper listens for;
@@ -153,157 +134,20 @@ SCRIPT_PATCH = """<script>
 })();
 </script>
 
-<!-- On-screen joystick UI. The .mobile-controls root is hidden by CSS
-     unless (pointer: coarse) matches AND we add the .enabled class below. -->
-<div class="mobile-controls" id="mobileControls" aria-hidden="true">
-  <div class="stick-zone left"  id="stickMove"><div class="stick-base"></div><div class="stick-knob"></div></div>
-  <div class="vbtn-col">
-    <div class="vbtn" id="btnUp">▲</div>
-    <div class="vbtn" id="btnDown">▼</div>
-  </div>
-  <div class="stick-zone right" id="stickLook"><div class="stick-base"></div><div class="stick-knob"></div></div>
-</div>
-
 <script>
 (function () {
-  // Mobile joystick driver. Wires two virtual sticks + Q/E buttons to the
-  // C++ FlyCamera via Module.ccall. No-op on desktop (pointer: fine) — the
-  // CSS keeps .mobile-controls hidden, the touch handlers see no events.
-
-  // Heuristic: only enable on touch-primary devices. We check pointer:coarse
-  // (the matchMedia way). 'ontouchstart' alone is unreliable on hybrid laptops.
-  // ?force_mobile=1 overrides the detection — used for local UI testing on
-  // a desktop browser where matchMedia('(pointer: coarse)') always reports
-  // false, even with devtools mobile emulation in some hosts.
-  var params = new URLSearchParams(window.location.search || '');
-  var forceMobile = params.get('force_mobile') === '1';
-  var isCoarse = forceMobile ||
-    (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
-  if (!isCoarse) return;
-
-  var root = document.getElementById('mobileControls');
-  if (!root) return;
-  root.classList.add('enabled');
-  root.setAttribute('aria-hidden', 'false');
-
-  // Per-stick state. `value` is normalised to [-1, 1] on each axis,
-  // updated on touchmove and zeroed on touchend / touchcancel.
-  function makeStick(zoneId) {
-    var zone = document.getElementById(zoneId);
-    var knob = zone.querySelector('.stick-knob');
-    var state = { activeId: null, value: { x: 0, y: 0 } };
-    var radius = 0;
-    var center = { x: 0, y: 0 };
-
-    function setKnob(dx, dy) {
-      knob.style.transform = 'translate(' + dx + 'px, ' + dy + 'px)';
-    }
-
-    function start(t) {
-      var rect = zone.getBoundingClientRect();
-      radius = Math.min(rect.width, rect.height) * 0.5 * 0.8;
-      center.x = rect.left + rect.width  * 0.5;
-      center.y = rect.top  + rect.height * 0.5;
-      state.activeId = t.identifier;
-      move(t);
-    }
-    function move(t) {
-      var dx = t.clientX - center.x;
-      var dy = t.clientY - center.y;
-      var len = Math.hypot(dx, dy);
-      if (len > radius && len > 0) {
-        dx = (dx / len) * radius;
-        dy = (dy / len) * radius;
-      }
-      setKnob(dx, dy);
-      state.value.x = radius > 0 ? dx / radius : 0;
-      state.value.y = radius > 0 ? dy / radius : 0;
-    }
-    function end() {
-      state.activeId = null;
-      state.value.x = 0; state.value.y = 0;
-      setKnob(0, 0);
-    }
-
-    zone.addEventListener('touchstart', function (e) {
-      // Take only the first touch landing in this zone — preserves the
-      // other zone's existing touch identifier.
-      if (state.activeId !== null) return;
-      for (var i = 0; i < e.changedTouches.length; ++i) {
-        start(e.changedTouches[i]);
-        break;
-      }
-      e.preventDefault();
-    }, { passive: false });
-
-    document.addEventListener('touchmove', function (e) {
-      if (state.activeId === null) return;
-      for (var i = 0; i < e.touches.length; ++i) {
-        if (e.touches[i].identifier === state.activeId) {
-          move(e.touches[i]);
-          e.preventDefault();
-          return;
-        }
-      }
-    }, { passive: false });
-
-    function maybeEnd(e) {
-      if (state.activeId === null) return;
-      // If our active touch is no longer in e.touches, the gesture ended.
-      for (var i = 0; i < e.touches.length; ++i) {
-        if (e.touches[i].identifier === state.activeId) return;
-      }
-      end();
-    }
-    document.addEventListener('touchend', maybeEnd);
-    document.addEventListener('touchcancel', maybeEnd);
-
-    return state;
-  }
-
-  function makeButton(btnId, onChange) {
-    var btn = document.getElementById(btnId);
-    var activeId = null;
-    function press(t) { activeId = t.identifier; btn.classList.add('active'); onChange(true); }
-    function release() { activeId = null; btn.classList.remove('active'); onChange(false); }
-    btn.addEventListener('touchstart', function (e) {
-      if (activeId !== null) return;
-      press(e.changedTouches[0]);
-      e.preventDefault();
-    }, { passive: false });
-    function maybeRelease(e) {
-      if (activeId === null) return;
-      for (var i = 0; i < e.touches.length; ++i) if (e.touches[i].identifier === activeId) return;
-      release();
-    }
-    btn.addEventListener('touchend', maybeRelease);
-    btn.addEventListener('touchcancel', maybeRelease);
-  }
-
-  var leftStick  = makeStick('stickMove');
-  var rightStick = makeStick('stickLook');
-  var verticalAxis = 0;
-  makeButton('btnUp',   function (down) { verticalAxis = down ? +1 : (verticalAxis === +1 ? 0 : verticalAxis); });
-  makeButton('btnDown', function (down) { verticalAxis = down ? -1 : (verticalAxis === -1 ? 0 : verticalAxis); });
-
-  // Per-frame poll: writes the latest stick + button state to the C++ side
-  // via Module.ccall. The look stick maps to yaw/pitch deltas (degrees per
-  // tick); LOOK_SPEED was tuned by hand against the existing desktop mouse
-  // sensitivity in FlyCamera.
-  var LOOK_SPEED = 1.5; // degrees per (frame · stick magnitude)
+  // Touch + pinch driver for OrbitCamera. 1-finger drag → orbit yaw/pitch;
+  // 2-finger pinch → zoom. Forwarded to C++ via Module.ccall. Desktop
+  // mouse drag + scroll wheel are handled directly inside OrbitCamera via
+  // Input::* (GLFW emscripten port), so we don't shim them here.
+  //
+  // Native builds never load this file (this is in Sandbox.html which is
+  // emscripten-only output).
 
   // Don't ccall before the wasm runtime has bound its function table —
   // emscripten installs assertion-shim exports that ABORT THE RUNTIME
-  // when called pre-init ("call to '_vinput_set_move' via reference
-  // taken before Wasm module initialization"). The abort happens
-  // inside assert() before any try/catch can run.
-  //
-  // Module.calledRun flips true after callMain returns / unwinds. With
-  // our flow that's after scene fetch + emscripten_set_main_loop's
-  // simulate-infinite-loop unwind. By then every wasm export is real.
-  // (The parent's loading overlay covers the iframe until splat-ready,
-  // so the user can't touch the joysticks before the gate opens
-  // anyway.)
+  // when called pre-init. Module.calledRun flips true once callMain
+  // returns; by then every export is real.
   var wasmReady = false;
   function isReady() {
     if (wasmReady) return true;
@@ -314,32 +158,92 @@ SCRIPT_PATCH = """<script>
     return false;
   }
 
-  function tick() {
-    requestAnimationFrame(tick);
+  // Sensitivity matches the C++ default on mouse drag (0.25 deg / px).
+  // Zoom delta is in log-radius units — 0.01 per pixel of pinch
+  // change ≈ ~10% radius change per 10px finger movement.
+  var ORBIT_DEG_PER_PIXEL = 0.25;
+  var ZOOM_PER_PIXEL      = 0.01;
+
+  // Active touches by identifier; map preserves insertion order so the
+  // first two ids drive the pinch / drag distinction.
+  var touches = new Map();
+  var pinchPrevDist = null;
+
+  function applyOrbit(dxPx, dyPx) {
     if (!isReady()) return;
-    // Left stick: x = strafe, y (screen-up) = forward. Invert y so
-    // pushing the knob up moves the camera forward (away from viewer).
+    if (dxPx === 0 && dyPx === 0) return;
     Module.ccall(
-      'vinput_set_move',
+      'vinput_apply_orbit',
       null,
-      ['number', 'number', 'number'],
-      [leftStick.value.x, verticalAxis, -leftStick.value.y]
+      ['number', 'number'],
+      [dxPx * ORBIT_DEG_PER_PIXEL, dyPx * ORBIT_DEG_PER_PIXEL]
     );
-    // Right stick: yaw / pitch deltas. Multiply by frame magnitude so
-    // a held knob keeps rotating the camera, and invert pitch so down
-    // on the stick = look down (matches mouse drag convention).
-    var yawDelta   = rightStick.value.x * LOOK_SPEED;
-    var pitchDelta = -rightStick.value.y * LOOK_SPEED;
-    if (yawDelta !== 0 || pitchDelta !== 0) {
-      Module.ccall(
-        'vinput_apply_look',
-        null,
-        ['number', 'number'],
-        [yawDelta, pitchDelta]
-      );
-    }
   }
-  requestAnimationFrame(tick);
+
+  function applyZoom(dPx) {
+    if (!isReady()) return;
+    if (dPx === 0) return;
+    // Spreading fingers (distance grows) = zoom IN = negative log-radius
+    // delta. C++ side treats positive zoomDelta as zoom-out.
+    Module.ccall('vinput_apply_zoom', null, ['number'], [-dPx * ZOOM_PER_PIXEL]);
+  }
+
+  function pinchDistance() {
+    var arr = Array.from(touches.values());
+    if (arr.length < 2) return null;
+    var dx = arr[0].x - arr[1].x;
+    var dy = arr[0].y - arr[1].y;
+    return Math.hypot(dx, dy);
+  }
+
+  document.addEventListener('touchstart', function (e) {
+    for (var i = 0; i < e.changedTouches.length; ++i) {
+      var t = e.changedTouches[i];
+      touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+    }
+    pinchPrevDist = pinchDistance();
+    e.preventDefault();
+  }, { passive: false });
+
+  document.addEventListener('touchmove', function (e) {
+    if (touches.size === 0) return;
+
+    if (touches.size === 1) {
+      // Single-finger drag → orbit. Use the moved touch's delta.
+      for (var i = 0; i < e.changedTouches.length; ++i) {
+        var t = e.changedTouches[i];
+        var prev = touches.get(t.identifier);
+        if (!prev) continue;
+        applyOrbit(t.clientX - prev.x, t.clientY - prev.y);
+        touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+      }
+    } else {
+      // Two+ fingers → pinch zoom. Track centroid distance change.
+      for (var j = 0; j < e.changedTouches.length; ++j) {
+        var tt = e.changedTouches[j];
+        if (touches.has(tt.identifier)) {
+          touches.set(tt.identifier, { x: tt.clientX, y: tt.clientY });
+        }
+      }
+      var d = pinchDistance();
+      if (d !== null && pinchPrevDist !== null) {
+        applyZoom(d - pinchPrevDist);
+      }
+      pinchPrevDist = d;
+    }
+    e.preventDefault();
+  }, { passive: false });
+
+  function dropTouches(e) {
+    for (var i = 0; i < e.changedTouches.length; ++i) {
+      touches.delete(e.changedTouches[i].identifier);
+    }
+    // Recompute pinch baseline so the transition pinch→drag (one finger
+    // lifts) doesn't apply a huge spurious orbit delta on the next move.
+    pinchPrevDist = pinchDistance();
+  }
+  document.addEventListener('touchend',    dropTouches);
+  document.addEventListener('touchcancel', dropTouches);
 })();
 </script>"""
 
