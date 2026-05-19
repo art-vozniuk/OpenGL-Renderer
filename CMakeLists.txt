@@ -58,6 +58,25 @@ if(NOT EMSCRIPTEN)
         )
     endif()
     FetchContent_MakeAvailable(glfw3webgpu)
+
+    # glfw3webgpu's own CMakeLists gates the Cocoa surface code behind
+    # `if (GLFW_BUILD_COCOA)`, but that variable is set by GLFW's
+    # cmake_dependent_option which only fires after glfw's CMakeLists runs
+    # — and we add glfw3webgpu BEFORE glfw via FetchContent. Result: the
+    # `_GLFW_COCOA` compile define never lands, the Cocoa case in
+    # glfw3webgpu.c is preprocessed away, and surface creation returns
+    # NULL at runtime ("wgpu surface create failed"). Patch around it by
+    # re-applying the platform glue ourselves on macOS — mirrors exactly
+    # what glfw3webgpu's CMakeLists would have done with the right timing.
+    if(APPLE AND TARGET glfw3webgpu)
+        target_compile_definitions(glfw3webgpu PRIVATE _GLFW_COCOA)
+        target_compile_options(glfw3webgpu PRIVATE -x objective-c)
+        target_link_libraries(glfw3webgpu PRIVATE
+            "-framework Cocoa"
+            "-framework CoreVideo"
+            "-framework IOKit"
+            "-framework QuartzCore")
+    endif()
 endif()
 
 
