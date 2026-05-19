@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SceneBase.h"
+#include "Engine/FlyCamera.h"
 #include "Engine/OrbitCamera.h"
 #include "Engine/Renderer/GaussianSplatRenderer.h"
 #include "Engine/Renderer/SplatLoader.h"
@@ -34,7 +35,7 @@ namespace Sandbox {
 	 *   <dir>/frame_00002.splat
 	 *    ...
 	 * If manifest.json is missing or unparseable, falls back to globbing
-	 * <dir>/*.splat in lexicographic order at the default fps.
+	 * <dir> for *.splat in lexicographic order at the default fps.
 	 *
 	 * Camera: orbit-only. The pivot is locked to the FIRST frame's
 	 * centroid for the whole playback — re-pivoting per frame would
@@ -74,7 +75,19 @@ namespace Sandbox {
 		void StartDecoder();
 		void StopDecoder();
 
+		// Camera mode arbitration — orbit by default, switch to fly on
+		// first WASDEQ press (same UX as the static gsplat scene), back
+		// to orbit on Tab. Fly mode preserves the orbit pose; orbit re-
+		// pivots in front of the fly camera at the previous orbit radius.
+		enum class CameraMode { Orbit = 0, Fly = 1 };
+		void SetMode(CameraMode mode);
+		bool AnyFlyKeyPressed() const;
+
 		Engine::OrbitCamera m_OrbitCam;
+		Engine::FlyCamera   m_FlyCam;
+		CameraMode          m_Mode = CameraMode::Orbit;
+		bool                m_PrevTabDown = false;  // edge-trigger Tab → orbit
+
 		std::unique_ptr<Engine::GaussianSplatRenderer> m_Splats;
 
 		Manifest                                      m_Manifest;

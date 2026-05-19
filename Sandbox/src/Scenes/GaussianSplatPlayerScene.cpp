@@ -3,6 +3,8 @@
 #include "SceneRegistry.h"
 #include "../SceneSelector.h"
 #include "Engine/Application.h"
+#include "Engine/Input.h"
+#include "Engine/KeyCodes.h"
 #include "Engine/Log.h"
 #include "Engine/Renderer/Renderer.h"
 #include "Engine/Renderer/SplatLoader.h"
@@ -125,6 +127,7 @@ namespace Sandbox {
 	{
 		const float aspect = m_ScreenWidth / m_ScreenHeight;
 		m_OrbitCam.SetPerspective(glm::radians(45.0f), aspect, 0.1f, 10000.0f);
+		m_FlyCam  .SetPerspective(glm::radians(45.0f), aspect, 0.1f, 10000.0f);
 
 		// --- Required: --player_dir=<path> ----------------------------------
 		auto dirParam = ReadParam("player_dir");
@@ -163,33 +166,61 @@ namespace Sandbox {
 		}
 		m_SplatCount = first.Count();
 
-		// Auto-frame on the first frame's centroid (alpha-filtered, same
-		// threshold as GaussianSplatScene). The orbit pivot stays fixed
-		// across the whole sequence so the camera doesn't lurch when
-		// ml-sharp's per-frame mean drifts.
+		// Auto-frame on the first frame's centroid + scene radius.
+		// Orbit pivot stays fixed for the whole sequence so the camera
+		// doesn't lurch when ml-sharp's per-frame mean drifts.
 		glm::vec3 target(0.0f);
+		float     spawnRadius = 1.5f;
 		{
-			glm::dvec3 sum(0.0);
-			size_t kept = 0;
+			std::vector<glm::vec3> kept;
+			kept.reserve(first.positions.size() / 2);
 			for (size_t i = 0; i < first.positions.size(); ++i) {
-				if (first.colors[i].a >= 32) {
-					sum += glm::dvec3(first.positions[i]);
-					++kept;
-				}
+				if (first.colors[i].a >= 32) kept.push_back(first.positions[i]);
 			}
-			if (kept == 0) {
-				for (const auto& p : first.positions) sum += glm::dvec3(p);
-				kept = std::max<size_t>(1, first.positions.size());
-			}
-			target = glm::vec3(sum / static_cast<double>(kept));
+			if (kept.empty()) kept.assign(first.positions.begin(), first.positions.end());
+
+			glm::dvec3 sum(0.0);
+			for (const auto& p : kept) sum += glm::dvec3(p);
+			target = glm::vec3(sum / (double)kept.size());
+
+			// Robust scene size: 95th-percentile per-axis |p - centroid|.
+			// Captures the bulk of the subject without the sky/background
+			// gaussians ml-sharp puts at huge z. Norm of the three axes
+			// gives a single "radius" that frames everything comfortably.
+			auto pctAxis = [&](int axis, float pct) {
+				std::vector<float> v; v.reserve(kept.size());
+				for (const auto& p : kept) v.push_back(std::fabs(p[axis] - target[axis]));
+				std::sort(v.begin(), v.end());
+				size_t k = std::min(v.size() - 1, (size_t)((pct / 100.0f) * v.size()));
+				return v[k];
+			};
+			const float hx = pctAxis(0, 95.0f);
+			const float hy = pctAxis(1, 95.0f);
+			const float hz = pctAxis(2, 95.0f);
+			float r = std::sqrt(hx * hx + hy * hy + hz * hz);
+			r = std::clamp(r, 0.5f, 8.0f);
+			spawnRadius = r;
 		}
 
-		// Default-ish spawn — same heuristic as the static gsplat scene's
-		// kDefaultSpawn. CLI override via --player_eye=x,y,z.
-		glm::vec3 eye = target + glm::vec3(0.0f, 0.0f, 1.5f);
+		// Pull camera back along +z. Sharp loader flips the gaussians via
+		// X-axis 180° so subject sits at -z; orbit cam at target + (0,0,+r)
+		// frames it from the front. 1.8 × radius leaves a comfortable
+		// margin even on tall portrait subjects.
+		glm::vec3 eye = target + glm::vec3(0.0f, 0.0f, spawnRadius * 1.8f);
 		if (auto s = ReadParam("player_eye"); s) {
 			if (auto v = ParseVec3(*s); v) eye = *v;
 		}
+		// --player_spawn_radius=X overrides the auto-computed pullback,
+		// keeping the +z direction. Handy for quick A/B without re-deriving
+		// an explicit eye coordinate.
+		if (auto s = ReadParam("player_spawn_radius"); s) {
+			try {
+				float r = std::stof(*s);
+				eye = target + glm::vec3(0.0f, 0.0f, r);
+			} catch (...) {}
+		}
+		INFO_CORE("gsplat_player: target=({0:.2f},{1:.2f},{2:.2f}) radius={3:.2f} eye=({4:.2f},{5:.2f},{6:.2f})",
+		          target.x, target.y, target.z, spawnRadius, eye.x, eye.y, eye.z);
 		m_OrbitCam.SetOrbit(target, eye);
 
 		// Upload frame 0 to the GPU. The renderer object is reused for
@@ -269,9 +300,25 @@ namespace Sandbox {
 		(void)ts;
 		if (!m_Splats || m_Manifest.framePaths.empty()) return;
 
-		// --- Camera (orbit-only for the player) -----------------------------
-		m_OrbitCam.Update(ts);
-		const SPtr<Camera> activeRenderCam = m_OrbitCam.GetRenderCamera();
+		// --- Camera mode arbitration ---------------------------------------
+		// First WASDEQ press promotes orbit → fly (same UX as the static
+		// gsplat scene). Tab (edge-triggered) brings you back to orbit.
+		const bool tabDown = Input::IsKeyPressed(KEY_TAB);
+		if (tabDown && !m_PrevTabDown) {
+			SetMode(CameraMode::Orbit);
+		} else if (m_Mode == CameraMode::Orbit && AnyFlyKeyPressed()) {
+			SetMode(CameraMode::Fly);
+		}
+		m_PrevTabDown = tabDown;
+
+		if (m_Mode == CameraMode::Orbit) {
+			m_OrbitCam.Update(ts);
+		} else {
+			m_FlyCam.Update(ts);
+		}
+		const SPtr<Camera> activeRenderCam = (m_Mode == CameraMode::Orbit)
+		    ? m_OrbitCam.GetRenderCamera()
+		    : m_FlyCam  .GetRenderCamera();
 
 		// --- Playback scheduling -------------------------------------------
 		// At fps F, the target frame index for wall-clock t is floor((t - t0) * F).
@@ -359,7 +406,9 @@ namespace Sandbox {
 		auto& mm = m_Splats->Metrics();
 		mm.cpuEncodeMs.Push(static_cast<float>((encodeEnd - encodeStart) * 1000.0));
 		mm.splatCount = static_cast<int>(m_SplatCount);
-		const glm::vec3 eye = m_OrbitCam.GetPosition();
+		const glm::vec3 eye = (m_Mode == CameraMode::Orbit)
+		    ? m_OrbitCam.GetPosition()
+		    : m_FlyCam  .GetPosition();
 		mm.camEye[0] = eye.x; mm.camEye[1] = eye.y; mm.camEye[2] = eye.z;
 		mm.Emit();
 
@@ -375,6 +424,38 @@ namespace Sandbox {
 
 		Renderer::EndScene();
 	}
+
+	bool GaussianSplatPlayerScene::AnyFlyKeyPressed() const
+	{
+		return Input::IsKeyPressed(KEY_W) || Input::IsKeyPressed(KEY_A)
+		    || Input::IsKeyPressed(KEY_S) || Input::IsKeyPressed(KEY_D)
+		    || Input::IsKeyPressed(KEY_Q) || Input::IsKeyPressed(KEY_E);
+	}
+
+
+	void GaussianSplatPlayerScene::SetMode(CameraMode mode)
+	{
+		if (mode == m_Mode) return;
+
+		// No view jump on either transition (same logic as the static
+		// gsplat scene). Orbit → fly: drop fly cam onto orbit pose. Fly
+		// → orbit: re-pivot orbit at the previous orbit radius in front
+		// of the fly camera so the user orbits around whatever they
+		// were aiming at, not the auto-framed centroid.
+		if (mode == CameraMode::Fly) {
+			const glm::vec3 eye = m_OrbitCam.GetPosition();
+			m_FlyCam.SetPose(eye, m_OrbitCam.GetTarget() - eye);
+		} else {
+			const glm::vec3 eye    = m_FlyCam.GetPosition();
+			const glm::vec3 fwd    = m_FlyCam.GetForward();
+			const float     radius = m_OrbitCam.GetRadius();
+			m_OrbitCam.SetOrbit(eye + fwd * radius, eye);
+		}
+		m_Mode = mode;
+		INFO_CORE("gsplat_player: camera mode → {0}",
+		          mode == CameraMode::Orbit ? "orbit" : "fly");
+	}
+
 
 	SCENE_REGISTER("gsplat_player", GaussianSplatPlayerScene)
 
