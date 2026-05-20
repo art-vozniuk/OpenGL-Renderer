@@ -26,12 +26,7 @@ namespace Sandbox {
 
 	namespace {
 
-		// Minimal hand-rolled JSON value extractor for the player manifest.
-		// We deliberately avoid pulling a JSON dep into the engine for one
-		// small file — the schema is fixed (sharp-video-local writes it) and
-		// we only need three keys: "fps", "frame_count", "prefix" / "pad" are
-		// optional. Returns std::nullopt on parse miss, leaving the caller
-		// to fall back to defaults + a directory glob.
+		// Tiny JSON value extractor — fixed manifest schema, no need for a dep.
 		std::optional<std::string> JsonGetString(const std::string& body, const char* key) {
 			std::string needle = std::string("\"") + key + "\"";
 			size_t k = body.find(needle);
@@ -95,9 +90,7 @@ namespace Sandbox {
 			}
 		}
 
-		// 2) If manifest told us the exact frame count + naming pattern,
-		// construct the path list directly — much faster than directory_iterator
-		// on a folder with thousands of files.
+		// Manifest path: build the list directly, skip the directory scan.
 		if (frameCount > 0) {
 			for (int i = 0; i < frameCount; ++i) {
 				char idx[32];
@@ -108,7 +101,7 @@ namespace Sandbox {
 			return m;
 		}
 
-		// 3) Fall back to globbing every .splat in lexicographic order.
+		// Fallback: glob *.splat in lexicographic order.
 		std::vector<std::string> found;
 		std::error_code ec;
 		for (auto& e : fs::directory_iterator(dir, ec)) {
@@ -129,7 +122,8 @@ namespace Sandbox {
 		m_OrbitCam.SetPerspective(glm::radians(45.0f), aspect, 0.1f, 10000.0f);
 		m_FlyCam  .SetPerspective(glm::radians(45.0f), aspect, 0.1f, 10000.0f);
 
-		// --- Required: --player_dir=<path> ----------------------------------
+		m_FlyCam.m_MaxMoveSpeed = 20.0f;  // 5× default, ml-sharp scenes are large
+
 		auto dirParam = ReadParam("player_dir");
 		if (!dirParam) {
 			ERROR_CORE("gsplat_player: --player_dir=<folder> is required");
@@ -156,8 +150,7 @@ namespace Sandbox {
 			m_Loop = (*v != "0" && *v != "false");
 		}
 
-		// --- Load frame 0 synchronously so we have something to render
-		// immediately (and so we can centre the orbit pivot on its centroid).
+		// Frame 0 sync — need something to render + centroid for orbit pivot.
 		SplatData first = SplatLoader::LoadSplat(m_Manifest.framePaths[0]);
 		if (first.Empty()) {
 			ERROR_CORE("gsplat_player: failed to load first frame '{0}'",
@@ -166,9 +159,8 @@ namespace Sandbox {
 		}
 		m_SplatCount = first.Count();
 
-		// Auto-frame on the first frame's centroid + scene radius.
-		// Orbit pivot stays fixed for the whole sequence so the camera
-		// doesn't lurch when ml-sharp's per-frame mean drifts.
+		// Auto-frame: alpha-filtered centroid + 95-pct radius. Pivot is
+		// fixed for the whole sequence to avoid lurching on per-frame drift.
 		glm::vec3 target(0.0f);
 		float     spawnRadius = 1.5f;
 		{
@@ -183,10 +175,7 @@ namespace Sandbox {
 			for (const auto& p : kept) sum += glm::dvec3(p);
 			target = glm::vec3(sum / (double)kept.size());
 
-			// Robust scene size: 95th-percentile per-axis |p - centroid|.
-			// Captures the bulk of the subject without the sky/background
-			// gaussians ml-sharp puts at huge z. Norm of the three axes
-			// gives a single "radius" that frames everything comfortably.
+			// 95-pct per-axis half-extent → vector-norm gives a robust radius.
 			auto pctAxis = [&](int axis, float pct) {
 				std::vector<float> v; v.reserve(kept.size());
 				for (const auto& p : kept) v.push_back(std::fabs(p[axis] - target[axis]));
@@ -202,17 +191,11 @@ namespace Sandbox {
 			spawnRadius = r;
 		}
 
-		// Pull camera back along +z. Sharp loader flips the gaussians via
-		// X-axis 180° so subject sits at -z; orbit cam at target + (0,0,+r)
-		// frames it from the front. 1.8 × radius leaves a comfortable
-		// margin even on tall portrait subjects.
+		// +z pullback (loader flips subject to -z). 1.8× radius frames it.
 		glm::vec3 eye = target + glm::vec3(0.0f, 0.0f, spawnRadius * 1.8f);
 		if (auto s = ReadParam("player_eye"); s) {
 			if (auto v = ParseVec3(*s); v) eye = *v;
 		}
-		// --player_spawn_radius=X overrides the auto-computed pullback,
-		// keeping the +z direction. Handy for quick A/B without re-deriving
-		// an explicit eye coordinate.
 		if (auto s = ReadParam("player_spawn_radius"); s) {
 			try {
 				float r = std::stof(*s);
@@ -223,10 +206,7 @@ namespace Sandbox {
 		          target.x, target.y, target.z, spawnRadius, eye.x, eye.y, eye.z);
 		m_OrbitCam.SetOrbit(target, eye);
 
-		// Upload frame 0 to the GPU. The renderer object is reused for
-		// every subsequent frame via additional Upload() calls; bind
-		// groups + sort scratch are reallocated inside Upload() each
-		// time, which Dawn handles cleanly.
+		// Renderer reused across frames via further Upload() calls.
 		m_Splats = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
 		m_Splats->Upload(first);
 		m_CurrentFrame = 0;
