@@ -43,7 +43,13 @@ namespace Engine {
 
 	void FlyCamera::Update(Timestep ts)
 	{
-		// --- Mouse look (instant; no smoothing). ----------------------------
+		// Scroll wheel → multiplicative speed tweak while RMB-flying.
+		const auto scroll = Input::GetScroll();
+		if (scroll.second != 0.0f && Input::IsMouseButtonPressed(m_DragButton)) {
+			m_MaxMoveSpeed *= std::pow(1.2f, scroll.second);
+			m_MaxMoveSpeed = glm::clamp(m_MaxMoveSpeed, 0.25f, 100.0f);
+		}
+
 		const bool mouseHeld = Input::IsMouseButtonPressed(m_DragButton);
 		if (mouseHeld) {
 			const auto pos = Input::GetMousePosition();

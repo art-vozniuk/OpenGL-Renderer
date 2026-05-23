@@ -624,7 +624,7 @@ namespace Sandbox {
 		// row isn't focused (React panel sends a JS-bridge message in
 		// that case; this is the in-canvas fallback).
 		static bool prevDelete = false;
-		const bool del = Input::IsKeyPressed(KEY_DELETE) || Input::IsKeyPressed(KEY_BACKSPACE);
+		const bool del = Input::IsKeyPressed(KEY_DELETE);
 		if (del && !prevDelete && m_Selected) {
 			DeleteObject(m_Selected);
 		}
