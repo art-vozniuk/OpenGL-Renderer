@@ -56,6 +56,10 @@ namespace Engine {
 		static WGPUCommandEncoder     Encoder();      // valid between BeginScene and EndScene
 		static WGPURenderPassEncoder  CurrentPass();  // valid between OpenColorPass and EndScene
 		static const SPtr<Camera>&    GetCamera();
+		// Swap-chain view for this frame. Used by scenes that need to open
+		// their own render passes (e.g. with depth attachment + LoadOp_Load).
+		// Returns nullptr outside BeginScene/EndScene.
+		static WGPUTextureView        FrameView();
 
 		// Schedule a one-shot framebuffer capture. The next EndScene call
 		// will (a) emit a CopyTextureToBuffer of the swap-chain into a

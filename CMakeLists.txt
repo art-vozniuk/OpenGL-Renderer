@@ -167,6 +167,7 @@ target_include_directories(Engine
 
 target_include_directories(Engine SYSTEM PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor/stb_image"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Engine/vendor"
 )
 
 # WebGPU uses [0, 1] clip-space Z (D3D / Vulkan style). Force GLM's
@@ -260,7 +261,7 @@ if(RENDERER_BUILD_SANDBOX)
             #   _malloc / _free        — JS allocates a heap buffer to copy the
             #                            file bytes into before handing the
             #                            pointer to editor_load_splat_bytes
-            -sEXPORTED_FUNCTIONS=_main,_vinput_apply_orbit,_vinput_apply_zoom,_vinput_request_mode,_editor_load_splat_bytes,_editor_clear_scene,_editor_select_object,_editor_delete_object,_editor_focus_object,_editor_rename_object,_editor_set_visibility,_editor_set_transform,_editor_set_camera_pose,_editor_set_snap,_malloc,_free
+            -sEXPORTED_FUNCTIONS=_main,_vinput_apply_orbit,_vinput_apply_zoom,_vinput_request_mode,_editor_load_splat_bytes,_editor_load_mesh_bytes,_editor_add_light,_editor_set_light_props,_editor_clear_scene,_editor_select_object,_editor_delete_object,_editor_focus_object,_editor_rename_object,_editor_set_visibility,_editor_set_transform,_editor_set_camera_pose,_editor_set_snap,_malloc,_free
             -sASSERTIONS=1
         )
         target_compile_options(Sandbox PRIVATE

@@ -183,5 +183,6 @@ namespace Engine {
 	WGPUCommandEncoder    Renderer::Encoder()    { return g.frame.encoder; }
 	WGPURenderPassEncoder Renderer::CurrentPass(){ return g.pass; }
 	const SPtr<Camera>&   Renderer::GetCamera()  { return g.camera; }
+	WGPUTextureView       Renderer::FrameView()  { return g.frame.valid ? g.frame.view : nullptr; }
 
 }

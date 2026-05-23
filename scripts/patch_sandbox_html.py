@@ -317,7 +317,7 @@ SCRIPT_PATCH = """<script>
       return;
     }
 
-    if (data.type === 'editor-load-splat') {
+    if (data.type === 'editor-load-splat' || data.type === 'editor-load-mesh') {
       if (!isReady()) {
         setTimeout(function () {
           window.dispatchEvent(new MessageEvent('message', { data: data }));
@@ -328,7 +328,7 @@ SCRIPT_PATCH = """<script>
       if (!(bytes instanceof ArrayBuffer)) {
         window.parent.postMessage({
           type: 'editor-error',
-          message: 'editor-load-splat: bytes is not an ArrayBuffer'
+          message: data.type + ': bytes is not an ArrayBuffer'
         }, '*');
         return;
       }
@@ -337,21 +337,38 @@ SCRIPT_PATCH = """<script>
       if (!ptr) {
         window.parent.postMessage({
           type: 'editor-error',
-          message: 'editor-load-splat: malloc failed (' + view.length + ' bytes)'
+          message: data.type + ': malloc failed (' + view.length + ' bytes)'
         }, '*');
         return;
       }
-      // Name string also marshalled — Module.ccall handles char* via the
-      // 'string' arg type.
       var name = (typeof data.name === 'string') ? data.name : '';
+      var fn = (data.type === 'editor-load-mesh')
+        ? 'editor_load_mesh_bytes'
+        : 'editor_load_splat_bytes';
       try {
         Module.HEAPU8.set(view, ptr);
-        Module.ccall('editor_load_splat_bytes', null,
+        Module.ccall(fn, null,
                      ['number', 'number', 'string'],
                      [ptr, view.length, name]);
       } finally {
         Module._free(ptr);
       }
+      return;
+    }
+
+    if (data.type === 'editor-add-light') {
+      if (!isReady()) return;
+      Module.ccall('editor_add_light', null, ['string'],
+                   [String(data.kind || 'directional')]);
+      return;
+    }
+
+    if (data.type === 'editor-set-light-props') {
+      if (!isReady()) return;
+      var col = data.color || [1,1,1];
+      Module.ccall('editor_set_light_props', null,
+                   ['number','number','number','number','number'],
+                   [data.id || 0, col[0], col[1], col[2], data.intensity != null ? data.intensity : 1.0]);
       return;
     }
 

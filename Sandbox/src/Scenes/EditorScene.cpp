@@ -8,6 +8,7 @@
 #include "Engine/Log.h"
 #include "Engine/Renderer/Renderer.h"
 #include "Engine/Renderer/SplatLoader.h"
+#include "Engine/Renderer/GltfLoader.h"
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -33,11 +34,9 @@ namespace Sandbox {
 
 	namespace {
 
-		// Fly-camera default spawn — above the grid looking forward.
 		const glm::vec3 kSpawnPos     = glm::vec3(0.0f, 2.5f, 6.0f);
 		const glm::vec3 kSpawnForward = glm::normalize(glm::vec3(0.0f, -0.25f, -1.0f));
 
-		// Pixel slop for "click vs drag" and gizmo hover.
 		constexpr float kClickSlopPx     = 4.0f;
 		constexpr float kAxisHitThreshPx = 10.0f;
 		constexpr float kRingHitThreshPx = 8.0f;
@@ -47,21 +46,20 @@ namespace Sandbox {
 		constexpr float kSnapRotateRad = glm::radians(15.0f);
 		constexpr float kSnapScale     = 0.10f;
 
-		// Gizmo geometric ratios. axis_length = world_scale.
-		//   shaft 0..0.70 = translate arrow shaft
-		//   ring radius  = 0.85
-		//   cube center   = 1.00 (with cube side = 0.10)
 		constexpr float kShaftFrac = 0.70f;
 		constexpr float kRingFrac  = 0.85f;
 		constexpr float kCubeFrac  = 1.00f;
-		constexpr float kCubeSize  = 0.10f;
-		constexpr float kCenterCubeSize = 0.08f;
 
-		// Soft (Spline-style) axis colors. R/G/B but less saturated.
+		// Light gizmo dimensions in world units.
+		constexpr float kLightSphereR = 0.18f;
+		constexpr float kLightRayLen  = 0.6f;
+		// Light pick-bbox half-extent (world space).
+		constexpr float kLightPickHalf = 0.25f;
+
 		const glm::vec4 kAxisCol[3] = {
-			glm::vec4(0.88f, 0.38f, 0.42f, 0.95f),  // X — soft red
-			glm::vec4(0.34f, 0.79f, 0.48f, 0.95f),  // Y — soft green
-			glm::vec4(0.35f, 0.55f, 0.94f, 0.95f),  // Z — soft blue
+			glm::vec4(0.88f, 0.38f, 0.42f, 0.95f),
+			glm::vec4(0.34f, 0.79f, 0.48f, 0.95f),
+			glm::vec4(0.35f, 0.55f, 0.94f, 0.95f),
 		};
 		const glm::vec4 kCenterCol = glm::vec4(0.78f, 0.78f, 0.82f, 0.90f);
 		const glm::vec4 kBboxColSelected   = glm::vec4(0.85f, 0.85f, 0.90f, 0.85f);
@@ -76,21 +74,9 @@ namespace Sandbox {
 		}
 
 		bool LmbDown() { return Input::IsMouseButtonPressed(MOUSE_BUTTON_LEFT); }
-		bool CtrlDown()
-		{
-			return Input::IsKeyPressed(KEY_LEFT_CONTROL)
-			    || Input::IsKeyPressed(KEY_RIGHT_CONTROL);
-		}
-		bool ShiftDown()
-		{
-			return Input::IsKeyPressed(KEY_LEFT_SHIFT)
-			    || Input::IsKeyPressed(KEY_RIGHT_SHIFT);
-		}
+		bool CtrlDown() { return Input::IsKeyPressed(KEY_LEFT_CONTROL)  || Input::IsKeyPressed(KEY_RIGHT_CONTROL); }
+		bool ShiftDown(){ return Input::IsKeyPressed(KEY_LEFT_SHIFT)    || Input::IsKeyPressed(KEY_RIGHT_SHIFT);   }
 
-		// Cursor + viewport in CSS pixels relative to the canvas.
-		// glfwGetCursorPos units vary between GLFW ports and DPRs, so we
-		// read the cursor straight from the DOM via a one-time listener
-		// and rescale via canvas.getBoundingClientRect.
 		struct CursorReading {
 			glm::vec2 cursor   = glm::vec2(0.0f);
 			glm::vec2 viewport = glm::vec2(1.0f);
@@ -208,15 +194,15 @@ namespace Sandbox {
 
 		float SnapTo(float v, float step) { return std::round(v / step) * step; }
 
-		void TransformAabb(const GaussianSplatRenderer::AABB& in,
+		void TransformAabb(const glm::vec3& mnIn, const glm::vec3& mxIn,
 		                   const glm::mat4& m,
 		                   glm::vec3& outMin, glm::vec3& outMax)
 		{
 			const glm::vec3 corners[8] = {
-				{ in.min.x, in.min.y, in.min.z }, { in.max.x, in.min.y, in.min.z },
-				{ in.min.x, in.max.y, in.min.z }, { in.max.x, in.max.y, in.min.z },
-				{ in.min.x, in.min.y, in.max.z }, { in.max.x, in.min.y, in.max.z },
-				{ in.min.x, in.max.y, in.max.z }, { in.max.x, in.max.y, in.max.z },
+				{ mnIn.x, mnIn.y, mnIn.z }, { mxIn.x, mnIn.y, mnIn.z },
+				{ mnIn.x, mxIn.y, mnIn.z }, { mxIn.x, mxIn.y, mnIn.z },
+				{ mnIn.x, mnIn.y, mxIn.z }, { mxIn.x, mnIn.y, mxIn.z },
+				{ mnIn.x, mxIn.y, mxIn.z }, { mxIn.x, mxIn.y, mxIn.z },
 			};
 			outMin = glm::vec3( std::numeric_limits<float>::max());
 			outMax = glm::vec3(-std::numeric_limits<float>::max());
@@ -250,8 +236,6 @@ namespace Sandbox {
 			return outT >= 0.0f;
 		}
 
-		// Filename helpers. Strip extension and any path prefix from a name
-		// like "/tmp/cat.splat" → "cat".
 		std::string StripFilename(const std::string& s)
 		{
 			auto slash = s.find_last_of("/\\");
@@ -260,9 +244,6 @@ namespace Sandbox {
 			return (dot == std::string::npos) ? base : base.substr(0, dot);
 		}
 
-		// Build a TRS-aware AABB-corner-bracket primitive: short L-shapes
-		// at every corner, pointing inward along each axis. `bracketLen`
-		// is the world-space length of each L arm.
 		void AddCornerBrackets(GizmoRenderer& giz,
 		                       const glm::vec3& mn, const glm::vec3& mx,
 		                       const glm::vec4& col, float thickness)
@@ -277,7 +258,6 @@ namespace Sandbox {
 					cx ? mx.x : mn.x,
 					cy ? mx.y : mn.y,
 					cz ? mx.z : mn.z);
-				// Direction TOWARD the opposite corner along each axis.
 				const glm::vec3 dirX = glm::vec3(cx ? -1.0f : 1.0f, 0.0f, 0.0f);
 				const glm::vec3 dirY = glm::vec3(0.0f, cy ? -1.0f : 1.0f, 0.0f);
 				const glm::vec3 dirZ = glm::vec3(0.0f, 0.0f, cz ? -1.0f : 1.0f);
@@ -285,6 +265,14 @@ namespace Sandbox {
 				giz.AddLine(corner, corner + dirY * bracketLen, col, thickness);
 				giz.AddLine(corner, corner + dirZ * bracketLen, col, thickness);
 			}}}
+		}
+
+		inline WGPUStringView SV(const char* s)
+		{
+			WGPUStringView v{};
+			v.data   = s;
+			v.length = WGPU_STRLEN;
+			return v;
 		}
 
 	} // namespace
@@ -298,6 +286,15 @@ namespace Sandbox {
 			case 2: return glm::vec3(0, 0, 1);
 			default: return glm::vec3(0, 1, 0);
 		}
+	}
+
+
+	glm::vec3 EditorScene::LightWorldDirection(const EditorObject& o)
+	{
+		// Default direction: down + slight forward bias. Rotated by the
+		// object's quaternion so users can orient the light via the gizmo.
+		const glm::vec3 def(0.0f, -1.0f, 0.3f);
+		return glm::normalize(o.transform.rotation * def);
 	}
 
 
@@ -329,11 +326,11 @@ namespace Sandbox {
 
 	EditorScene::~EditorScene()
 	{
+		if (m_DepthView) { wgpuTextureViewRelease(m_DepthView); m_DepthView = nullptr; }
+		if (m_DepthTex)  { wgpuTextureRelease(m_DepthTex);      m_DepthTex  = nullptr; }
 		if (s_Current == this) s_Current = nullptr;
 	}
 
-
-	// --- Object book-keeping ---------------------------------------------------
 
 	EditorScene::EditorObject* EditorScene::FindObject(ObjectId id)
 	{
@@ -354,7 +351,6 @@ namespace Sandbox {
 	std::string EditorScene::AutoNameFor(const std::string& filenameStem) const
 	{
 		std::string base = filenameStem.empty() ? std::string("object") : filenameStem;
-		// Walk indices until we find an unused name.
 		auto exists = [&](const std::string& n) {
 			for (const auto& o : m_Objects) if (o.name == n) return true;
 			return false;
@@ -380,14 +376,36 @@ namespace Sandbox {
 	}
 
 
+	bool EditorScene::GetLocalAabb(const EditorObject& o, glm::vec3& mn, glm::vec3& mx) const
+	{
+		if (o.kind == Kind::Splat && o.splat && o.splat->BoundingBox().valid) {
+			mn = o.splat->BoundingBox().min;
+			mx = o.splat->BoundingBox().max;
+			return true;
+		}
+		if (o.kind == Kind::Mesh && o.mesh && o.mesh->BoundingBox().valid) {
+			mn = o.mesh->BoundingBox().min;
+			mx = o.mesh->BoundingBox().max;
+			return true;
+		}
+		if (o.kind == Kind::Light) {
+			mn = glm::vec3(-kLightPickHalf);
+			mx = glm::vec3( kLightPickHalf);
+			return true;
+		}
+		return false;
+	}
+
+
 	void EditorScene::ComputeWorldAabb(const EditorObject& o,
 	                                   glm::vec3& outMin, glm::vec3& outMax) const
 	{
-		if (!o.splat || !o.splat->BoundingBox().valid) {
+		glm::vec3 mn, mx;
+		if (!GetLocalAabb(o, mn, mx)) {
 			outMin = outMax = glm::vec3(0.0f);
 			return;
 		}
-		TransformAabb(o.splat->BoundingBox(), BuildObjectModelMatrix(o), outMin, outMax);
+		TransformAabb(mn, mx, BuildObjectModelMatrix(o), outMin, outMax);
 	}
 
 
@@ -399,14 +417,13 @@ namespace Sandbox {
 	}
 
 
-	// --- Picking ---------------------------------------------------------------
-
 	bool EditorScene::RaycastObject(const EditorObject& o, const glm::vec3& origin,
 	                                const glm::vec3& dir, float& outT) const
 	{
-		if (!o.splat || !o.splat->BoundingBox().valid) return false;
 		glm::vec3 mn, mx;
 		ComputeWorldAabb(o, mn, mx);
+		// For "empty" objects (kind without geometry), mn == mx; reject.
+		if (mn == mx) return false;
 		return RayAabb(origin, dir, mn, mx, outT);
 	}
 
@@ -449,7 +466,6 @@ namespace Sandbox {
 			}
 		};
 
-		// Translate arrow stems: pivot → pivot + axis * L * kShaftFrac.
 		for (int a = 0; a < 3; ++a) {
 			const glm::vec3 tip = pivot + AxisDir(a) * L * kShaftFrac;
 			glm::vec2 tipPx;
@@ -458,7 +474,6 @@ namespace Sandbox {
 			consider(GizmoHit::Kind::TranslateAxis, a, d, kAxisHitThreshPx);
 		}
 
-		// Rotate rings: project ~48 sample points and find closest chord.
 		constexpr int kRingSamples = 48;
 		for (int a = 0; a < 3; ++a) {
 			const glm::vec3 axis = AxisDir(a);
@@ -487,7 +502,6 @@ namespace Sandbox {
 			}
 		}
 
-		// Scale cubes: distance to projected cube center.
 		for (int a = 0; a < 3; ++a) {
 			const glm::vec3 c = pivot + AxisDir(a) * L * kCubeFrac;
 			glm::vec2 px;
@@ -495,14 +509,11 @@ namespace Sandbox {
 			consider(GizmoHit::Kind::ScaleAxis, a, glm::length(cursor - px), kPointHitThreshPx);
 		}
 
-		// Center cube (uniform scale).
 		consider(GizmoHit::Kind::ScaleUniform, 3, glm::length(cursor - pivotPx), kPointHitThreshPx);
 
 		return best;
 	}
 
-
-	// --- Drag ------------------------------------------------------------------
 
 	void EditorScene::BeginDrag(const GizmoHit& hit, const glm::vec2& cursor,
 	                            const glm::vec2& viewport)
@@ -518,7 +529,6 @@ namespace Sandbox {
 		m_Drag.startTransform = o->transform;
 
 		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
-		// Freeze pivot for the gesture — BeginDrag and UpdateDrag must agree.
 		const glm::vec3 pivot = GizmoPivot();
 		m_Drag.dragPivot = pivot;
 
@@ -607,6 +617,7 @@ namespace Sandbox {
 		}
 
 		if (o->splat) o->splat->SetModelMatrix(BuildObjectModelMatrix(*o));
+		if (o->mesh)  o->mesh->SetModelMatrix(BuildObjectModelMatrix(*o));
 		PostTransformUpdate(false);
 	}
 
@@ -618,13 +629,8 @@ namespace Sandbox {
 	}
 
 
-	// --- Per-frame -------------------------------------------------------------
-
 	void EditorScene::HandleHotkeys()
 	{
-		// Delete key removes the selected object — handy when the table
-		// row isn't focused (React panel sends a JS-bridge message in
-		// that case; this is the in-canvas fallback).
 		static bool prevDelete = false;
 		const bool del = Input::IsKeyPressed(KEY_DELETE);
 		if (del && !prevDelete && m_Selected) {
@@ -645,10 +651,8 @@ namespace Sandbox {
 		}
 		const bool lmb = LmbDown();
 
-		// Hover update while not dragging.
 		if (!m_Drag.active) m_Hover = PickGizmoHandle(cursor, viewport);
 
-		// LMB press.
 		if (lmb && !m_PrevLmb) {
 			m_LmbPressCursor = cursor;
 			if (m_Hover.kind != GizmoHit::Kind::None) {
@@ -656,15 +660,12 @@ namespace Sandbox {
 			}
 		}
 
-		// LMB drag.
 		if (lmb && m_Drag.active) UpdateDrag(cursor, viewport);
 
-		// LMB release.
 		if (!lmb && m_PrevLmb) {
 			if (m_Drag.active) {
 				EndDrag();
 			} else if (glm::length(cursor - m_LmbPressCursor) < kClickSlopPx) {
-				// Plain click — pick under cursor.
 				glm::vec3 o, d;
 				CursorRay(m_Camera->GetRenderCamera(), cursor, viewport, o, d);
 				const ObjectId picked = PickObject(o, d);
@@ -683,22 +684,44 @@ namespace Sandbox {
 		m_Gizmo->Clear();
 		if (m_Objects.empty()) return;
 
-		// Bounding-box corner brackets per object.
+		// Bounding-box brackets per object (for everything with geometry).
 		for (const auto& o : m_Objects) {
-			if (!o.splat || !o.visible) continue;
+			if (!o.visible) continue;
+			if (o.kind == Kind::Light) continue;
 			glm::vec3 mn, mx;
 			ComputeWorldAabb(o, mn, mx);
+			if (mn == mx) continue;
 			const bool sel = (o.id == m_Selected);
 			AddCornerBrackets(*m_Gizmo, mn, mx,
 			                  sel ? kBboxColSelected : kBboxColUnselected,
 			                  sel ? 3.0f : 2.0f);
 		}
 
-		// Transform gizmo on the selected object.
-		const auto* sel = FindObject(m_Selected);
-		if (!sel || !sel->splat || !sel->visible) return;
-
+		// Light gizmos: ring + rod indicating direction.
 		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
+		const glm::vec3 camPos = CameraWorldPos(cam);
+		for (const auto& o : m_Objects) {
+			if (!o.visible || o.kind != Kind::Light) continue;
+			const bool sel = (o.id == m_Selected);
+			glm::vec3 baseColor = o.light ? o.light->color : glm::vec3(1.0f);
+			glm::vec4 col(baseColor, sel ? 1.0f : 0.65f);
+
+			const glm::vec3 c = o.transform.position;
+			// Small disk facing camera.
+			m_Gizmo->AddDisk(c, kLightSphereR * 0.6f, camPos, col, 16);
+			// Ring around the light center.
+			const glm::vec3 toCam = glm::normalize(camPos - c);
+			m_Gizmo->AddRing(c, toCam, kLightSphereR, col, 24, sel ? 2.5f : 1.5f);
+			// Direction rod + arrowhead.
+			const glm::vec3 d = LightWorldDirection(o);
+			const glm::vec3 tip = c + d * kLightRayLen;
+			m_Gizmo->AddLine(c, tip, col, sel ? 3.0f : 2.0f);
+			m_Gizmo->AddArrowHead(tip, d, 0.18f, 0.10f, camPos, col);
+		}
+
+		const auto* sel = FindObject(m_Selected);
+		if (!sel || !sel->visible) return;
+
 		const glm::vec3 pivot = GizmoPivot();
 		const float L = GizmoWorldScale(cam, pivot);
 
@@ -707,13 +730,10 @@ namespace Sandbox {
 			return m_Hover.kind == k && m_Hover.axis == a;
 		};
 
-		const glm::vec3 camPos = CameraWorldPos(cam);
-
 		for (int a = 0; a < 3; ++a) {
 			const glm::vec4 baseCol = kAxisCol[a];
 			const glm::vec3 axisDir = AxisDir(a);
 
-			// Translate: chunky stem + big solid arrowhead.
 			{
 				const bool h = isHover(GizmoHit::Kind::TranslateAxis, a);
 				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
@@ -721,8 +741,6 @@ namespace Sandbox {
 				m_Gizmo->AddLine(pivot, tip, c, 5.5f);
 				m_Gizmo->AddArrowHead(tip, axisDir, L * 0.24f, L * 0.14f, camPos, c);
 			}
-
-			// Rotate: front-facing arc only.
 			{
 				const bool h = isHover(GizmoHit::Kind::RotateRing, a);
 				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
@@ -737,8 +755,6 @@ namespace Sandbox {
 				                centerAng - halfSpan, centerAng + halfSpan,
 				                c, 32, 4.5f);
 			}
-
-			// Scale: filled disk at axis tip.
 			{
 				const bool h = isHover(GizmoHit::Kind::ScaleAxis, a);
 				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
@@ -747,14 +763,12 @@ namespace Sandbox {
 			}
 		}
 
-		// Center disk for uniform scale.
 		{
 			const bool h = isHover(GizmoHit::Kind::ScaleUniform, 3);
 			const glm::vec4 c = h ? HoverCol(kCenterCol) : kCenterCol;
 			m_Gizmo->AddDisk(pivot, L * 0.055f, camPos, c, 16);
 		}
 
-		// Rotation arc while dragging — visualizes the swept angle.
 		if (m_Drag.active && m_Drag.kind == GizmoHit::Kind::RotateRing) {
 			const int a = m_Drag.axis;
 			const glm::vec3 axis = AxisDir(a);
@@ -773,7 +787,6 @@ namespace Sandbox {
 				const float t = float(i) / float(N);
 				const float ang = a0 + span * t;
 				const glm::vec3 cur = pivot + (std::cos(ang) * u + std::sin(ang) * v) * (L * kRingFrac);
-				// Filled-look: 3 lines per segment (radial wedge edges).
 				m_Gizmo->AddLine(pivot, cur, fillCol, 1.5f);
 				m_Gizmo->AddLine(prev, cur, glm::vec4(fillCol.r, fillCol.g, fillCol.b, 0.95f), 3.0f);
 				prev = cur;
@@ -782,24 +795,65 @@ namespace Sandbox {
 	}
 
 
+	const EditorScene::EditorObject* EditorScene::FirstActiveLight() const
+	{
+		for (const auto& o : m_Objects) {
+			if (o.visible && o.kind == Kind::Light) return &o;
+		}
+		return nullptr;
+	}
+
+
+	void EditorScene::EnsureDepthTexture(uint32_t w, uint32_t h)
+	{
+		if (w == 0 || h == 0) return;
+		if (m_DepthTex && m_DepthWidth == w && m_DepthHeight == h) return;
+		if (m_DepthView) { wgpuTextureViewRelease(m_DepthView); m_DepthView = nullptr; }
+		if (m_DepthTex)  { wgpuTextureRelease(m_DepthTex);      m_DepthTex  = nullptr; }
+
+		WGPUContext& ctx = Application::Get().GetGfx();
+		WGPUTextureDescriptor td{};
+		td.label = SV("editor-depth");
+		td.usage = WGPUTextureUsage_RenderAttachment;
+		td.dimension = WGPUTextureDimension_2D;
+		td.size.width  = w;
+		td.size.height = h;
+		td.size.depthOrArrayLayers = 1;
+		td.format = MeshRenderer::DepthFormat();
+		td.mipLevelCount = 1;
+		td.sampleCount   = 1;
+		m_DepthTex = wgpuDeviceCreateTexture(ctx.Device(), &td);
+
+		WGPUTextureViewDescriptor vd{};
+		vd.format = td.format;
+		vd.dimension = WGPUTextureViewDimension_2D;
+		vd.aspect = WGPUTextureAspect_DepthOnly;
+		vd.mipLevelCount = 1;
+		vd.arrayLayerCount = 1;
+		m_DepthView = wgpuTextureCreateView(m_DepthTex, &vd);
+
+		m_DepthWidth = w;
+		m_DepthHeight = h;
+	}
+
+
 	void EditorScene::OnUpdate(Timestep ts)
 	{
 		const glm::vec2 viewport = glm::vec2(m_ScreenWidth, m_ScreenHeight);
 
 		HandleHotkeys();
-		// Editor only has the fly camera now — no orbit, no mode toggle.
 		HandleMouseInteraction(viewport);
 		m_Camera->Update(ts);
 
 		const SPtr<Camera> activeCam = m_Camera->GetRenderCamera();
 
-		// Per-object frame-interval samples + perf tick for the FIRST splat
-		// only (perf overlay is a single set of metrics; later we'll need to
-		// scope this to selected, but for now the first object wins).
+		// First-splat perf instrumentation (same as before, just generalised to find any splat).
 		static double s_PrevFrameStart = 0.0;
 		const double frameStart = glfwGetTime();
 		Engine::GaussianSplatRenderer* perfSplat = nullptr;
-		for (auto& o : m_Objects) { if (o.splat && o.visible) { perfSplat = o.splat.get(); break; } }
+		for (auto& o : m_Objects) {
+			if (o.kind == Kind::Splat && o.splat && o.visible) { perfSplat = o.splat.get(); break; }
+		}
 		if (perfSplat && s_PrevFrameStart > 0.0) {
 			perfSplat->Metrics().frameMs.Push(
 				static_cast<float>((frameStart - s_PrevFrameStart) * 1000.0));
@@ -809,22 +863,25 @@ namespace Sandbox {
 
 		if (!Renderer::BeginScene(activeCam)) return;
 
-		// Sort + draw EVERY visible object. Each owns its own renderer.
 		const glm::mat4 view = activeCam->GetViewMatrix();
 		const glm::mat4 proj = activeCam->GetProjectionMatrix();
+
+		// 1) Splat sort encoding (compute) — must happen before any render
+		//    pass is open.
 		for (auto& o : m_Objects) {
-			if (!o.splat || !o.visible) continue;
+			if (o.kind != Kind::Splat || !o.splat || !o.visible) continue;
 			o.splat->SetModelMatrix(BuildObjectModelMatrix(o));
 			o.splat->EncodeSort(Renderer::Encoder(), view, proj);
 		}
 
+		// 2) Splat / grid / gizmo pass (no depth — existing pipelines).
 		const WGPUPassTimestampWrites* renderTw =
 			perfSplat ? perfSplat->GetRenderPassTimestampWrites() : nullptr;
 		Renderer::OpenColorPass(0.12f, 0.13f, 0.16f, 1.0f, renderTw);
 
 		if (m_Grid) m_Grid->EncodeRender(Renderer::CurrentPass(), activeCam);
 		for (auto& o : m_Objects) {
-			if (!o.splat || !o.visible) continue;
+			if (o.kind != Kind::Splat || !o.splat || !o.visible) continue;
 			o.splat->EncodeRender(Renderer::CurrentPass(), activeCam, viewport);
 		}
 
@@ -834,6 +891,62 @@ namespace Sandbox {
 		Renderer::ClosePass();
 		if (perfSplat) perfSplat->ResolveAndReadTimestamps(Renderer::Encoder());
 
+		// 3) Mesh pass — load color (preserve splats/grid), clear depth.
+		bool anyMesh = false;
+		for (auto& o : m_Objects) {
+			if (o.kind == Kind::Mesh && o.mesh && o.visible) { anyMesh = true; break; }
+		}
+		if (anyMesh) {
+			WGPUContext& ctx = Application::Get().GetGfx();
+			EnsureDepthTexture(ctx.Width(), ctx.Height());
+
+			glm::vec3 lDir(0.0f, 1.0f, -0.3f);
+			glm::vec3 lColor(1.0f);
+			glm::vec3 ambient(0.12f, 0.13f, 0.16f);
+			if (const auto* lo = FirstActiveLight()) {
+				const glm::vec3 d = LightWorldDirection(*lo);
+				lDir = -d;
+				if (lo->light) lColor = lo->light->color * lo->light->intensity;
+			}
+
+			WGPUTextureView frameView = Renderer::FrameView();
+			if (frameView && m_DepthView) {
+				WGPURenderPassColorAttachment color{};
+				color.view       = frameView;
+				color.loadOp     = WGPULoadOp_Load;
+				color.storeOp    = WGPUStoreOp_Store;
+				color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+
+				WGPURenderPassDepthStencilAttachment depth{};
+				depth.view              = m_DepthView;
+				depth.depthLoadOp       = WGPULoadOp_Clear;
+				depth.depthStoreOp      = WGPUStoreOp_Store;
+				depth.depthClearValue   = 1.0f;
+				depth.depthReadOnly     = 0;
+				depth.stencilLoadOp     = WGPULoadOp_Undefined;
+				depth.stencilStoreOp    = WGPUStoreOp_Undefined;
+				depth.stencilReadOnly   = 1;
+
+				WGPURenderPassDescriptor rp{};
+				rp.label                   = SV("editor-mesh-pass");
+				rp.colorAttachmentCount    = 1;
+				rp.colorAttachments        = &color;
+				rp.depthStencilAttachment  = &depth;
+
+				WGPURenderPassEncoder meshPass = wgpuCommandEncoderBeginRenderPass(
+					Renderer::Encoder(), &rp);
+				for (auto& o : m_Objects) {
+					if (o.kind != Kind::Mesh || !o.mesh || !o.visible) continue;
+					o.mesh->SetModelMatrix(BuildObjectModelMatrix(o));
+					o.mesh->EncodeRender(meshPass, activeCam, viewport, lDir, lColor, ambient);
+				}
+				wgpuRenderPassEncoderEnd(meshPass);
+				wgpuRenderPassEncoderRelease(meshPass);
+			}
+		}
+
+		Renderer::EndScene();
+
 		if (perfSplat) {
 			auto& m = perfSplat->Metrics();
 			m.splatCount = static_cast<int>(perfSplat->SplatCount());
@@ -841,8 +954,6 @@ namespace Sandbox {
 			m.camEye[0] = eye.x; m.camEye[1] = eye.y; m.camEye[2] = eye.z;
 			m.Emit();
 		}
-
-		Renderer::EndScene();
 
 		// Throttled camera-pose broadcast for the React inspector.
 		static double s_lastCamPoseEmit = 0.0;
@@ -862,8 +973,6 @@ namespace Sandbox {
 	}
 
 
-	// --- Public API ------------------------------------------------------------
-
 	EditorScene::ObjectId EditorScene::LoadSplatFromBytes(const uint8_t* data, size_t size,
 	                                                      const std::string& sourceName)
 	{
@@ -878,6 +987,7 @@ namespace Sandbox {
 
 		EditorObject o;
 		o.id    = m_NextId++;
+		o.kind  = Kind::Splat;
 		o.name  = AutoNameFor(StripFilename(sourceName));
 		o.splat = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
 		o.splat->Upload(parsed);
@@ -900,13 +1010,83 @@ namespace Sandbox {
 		m_Objects.push_back(std::move(o));
 		m_Selected = id;
 
-		INFO_CORE("EditorScene: loaded object id={0} ('{1}'), total objects={2}",
+		INFO_CORE("EditorScene: loaded splat id={0} ('{1}'), total objects={2}",
 		          (uint64_t)id, FindObject(id)->name, (uint64_t)m_Objects.size());
 
 		PostObjectsList();
 		PostSelectionChanged();
 		PostTransformUpdate(true);
 		return id;
+	}
+
+
+	EditorScene::ObjectId EditorScene::LoadMeshFromBytes(const uint8_t* data, size_t size,
+	                                                     const std::string& sourceName)
+	{
+		INFO_CORE("EditorScene: parsing {0} byte glb payload (name='{1}')",
+		          (uint64_t)size, sourceName);
+		MeshData parsed = GltfLoader::LoadGlbFromBytes(data, size, sourceName.c_str());
+		if (parsed.Empty()) {
+			ERROR_CORE("EditorScene: glb parse returned no primitives");
+			PostSceneMessage("{\"type\":\"editor-error\",\"message\":\"Failed to parse glb\"}");
+			return 0;
+		}
+
+		EditorObject o;
+		o.id    = m_NextId++;
+		o.kind  = Kind::Mesh;
+		o.name  = AutoNameFor(StripFilename(sourceName));
+		o.mesh  = std::make_unique<MeshRenderer>(Application::Get().GetGfx());
+		o.mesh->Upload(parsed);
+		// Land the mesh's AABB-bottom on the grid.
+		if (parsed.aabbValid) {
+			o.transform.position.y = -parsed.aabbMin.y;
+		}
+		o.mesh->SetModelMatrix(o.transform.Matrix());
+		o.visible = true;
+
+		const ObjectId id = o.id;
+		m_Objects.push_back(std::move(o));
+		m_Selected = id;
+
+		INFO_CORE("EditorScene: loaded mesh id={0} ('{1}'), total objects={2}",
+		          (uint64_t)id, FindObject(id)->name, (uint64_t)m_Objects.size());
+
+		PostObjectsList();
+		PostSelectionChanged();
+		PostTransformUpdate(true);
+		return id;
+	}
+
+
+	EditorScene::ObjectId EditorScene::AddLight(const std::string& kind)
+	{
+		(void)kind; // v1: only directional supported
+		EditorObject o;
+		o.id    = m_NextId++;
+		o.kind  = Kind::Light;
+		o.name  = AutoNameFor("Light");
+		o.transform.position = glm::vec3(0.0f, 3.0f, 0.0f);
+		o.light = LightProps{};
+		o.visible = true;
+
+		const ObjectId id = o.id;
+		m_Objects.push_back(std::move(o));
+		m_Selected = id;
+
+		PostObjectsList();
+		PostSelectionChanged();
+		PostTransformUpdate(true);
+		return id;
+	}
+
+
+	void EditorScene::SetLightProps(ObjectId id, const glm::vec3& color, float intensity)
+	{
+		auto* o = FindObject(id);
+		if (!o || o->kind != Kind::Light || !o->light) return;
+		o->light->color = color;
+		o->light->intensity = std::max(0.0f, intensity);
 	}
 
 
@@ -929,7 +1109,6 @@ namespace Sandbox {
 
 	void EditorScene::SelectObject(ObjectId id)
 	{
-		// Allow id=0 to deselect.
 		if (id != 0 && !FindObject(id)) return;
 		if (m_Selected == id) return;
 		m_Selected = id;
@@ -941,16 +1120,14 @@ namespace Sandbox {
 	void EditorScene::FocusObject(ObjectId id)
 	{
 		const auto* o = FindObject(id);
-		if (!o || !o->splat) return;
+		if (!o) return;
 		glm::vec3 mn, mx;
 		ComputeWorldAabb(*o, mn, mx);
 		const glm::vec3 center = (mn + mx) * 0.5f;
 		const float diag = std::max(0.5f, glm::length(mx - mn));
-		// Position the camera back along its current forward by ~1.6 diagonals.
 		const glm::vec3 fwd = m_Camera->GetForward();
 		const glm::vec3 eye = center - fwd * (diag * 1.6f);
 		SwitchCameraToFly(eye, glm::normalize(center - eye));
-		// Re-select if needed so the gizmo shows.
 		if (m_Selected != id) {
 			m_Selected = id;
 			PostSelectionChanged();
@@ -986,6 +1163,7 @@ namespace Sandbox {
 		o->transform.rotation = glm::quat(glm::radians(eulerDeg));
 		o->transform.scale    = scale;
 		if (o->splat) o->splat->SetModelMatrix(BuildObjectModelMatrix(*o));
+		if (o->mesh)  o->mesh->SetModelMatrix(BuildObjectModelMatrix(*o));
 		PostTransformUpdate(true);
 	}
 
@@ -1015,22 +1193,39 @@ namespace Sandbox {
 	}
 
 
-	// --- Posting ---------------------------------------------------------------
-
 	void EditorScene::PostObjectsList()
 	{
-		// Compact JSON — keep within a reasonable stack buffer.
 		std::string body = "{\"type\":\"editor-objects\",\"objects\":[";
 		bool first = true;
 		for (const auto& o : m_Objects) {
-			char row[256];
-			std::snprintf(row, sizeof(row),
-			              "%s{\"id\":%llu,\"name\":\"%s\",\"visible\":%s,\"count\":%llu}",
-			              first ? "" : ",",
-			              (unsigned long long)o.id,
-			              o.name.c_str(),
-			              o.visible ? "true" : "false",
-			              (unsigned long long)(o.splat ? o.splat->SplatCount() : 0));
+			const char* kindStr =
+				o.kind == Kind::Splat ? "splat" :
+				o.kind == Kind::Mesh  ? "mesh"  :
+				"light_directional";
+			uint64_t count = 0;
+			if (o.kind == Kind::Splat && o.splat) count = o.splat->SplatCount();
+			else if (o.kind == Kind::Mesh && o.mesh) count = o.mesh->PrimitiveCount();
+
+			char row[384];
+			if (o.kind == Kind::Light && o.light) {
+				std::snprintf(row, sizeof(row),
+				              "%s{\"id\":%llu,\"kind\":\"%s\",\"name\":\"%s\",\"visible\":%s,"
+				              "\"count\":%llu,"
+				              "\"light\":{\"color\":[%.3f,%.3f,%.3f],\"intensity\":%.3f}}",
+				              first ? "" : ",",
+				              (unsigned long long)o.id, kindStr, o.name.c_str(),
+				              o.visible ? "true" : "false",
+				              (unsigned long long)count,
+				              o.light->color.r, o.light->color.g, o.light->color.b,
+				              o.light->intensity);
+			} else {
+				std::snprintf(row, sizeof(row),
+				              "%s{\"id\":%llu,\"kind\":\"%s\",\"name\":\"%s\",\"visible\":%s,\"count\":%llu}",
+				              first ? "" : ",",
+				              (unsigned long long)o.id, kindStr, o.name.c_str(),
+				              o.visible ? "true" : "false",
+				              (unsigned long long)count);
+			}
 			body += row;
 			first = false;
 		}
@@ -1108,6 +1303,29 @@ EDITOR_EXPORT void editor_load_splat_bytes(uint8_t* data, int len, const char* n
 	if (!s) return;
 	if (!data || len <= 0) return;
 	s->LoadSplatFromBytes(data, static_cast<size_t>(len), name ? name : "");
+}
+
+EDITOR_EXPORT void editor_load_mesh_bytes(uint8_t* data, int len, const char* name)
+{
+	auto* s = ::Sandbox::EditorScene::Current();
+	if (!s) return;
+	if (!data || len <= 0) return;
+	s->LoadMeshFromBytes(data, static_cast<size_t>(len), name ? name : "");
+}
+
+EDITOR_EXPORT void editor_add_light(const char* kind)
+{
+	auto* s = ::Sandbox::EditorScene::Current();
+	if (!s) return;
+	s->AddLight(kind ? kind : "directional");
+}
+
+EDITOR_EXPORT void editor_set_light_props(double id, double r, double g, double b, double intensity)
+{
+	auto* s = ::Sandbox::EditorScene::Current();
+	if (!s) return;
+	s->SetLightProps(static_cast<::Sandbox::EditorScene::ObjectId>(id),
+	                 glm::vec3((float)r, (float)g, (float)b), (float)intensity);
 }
 
 EDITOR_EXPORT void editor_clear_scene(void)
