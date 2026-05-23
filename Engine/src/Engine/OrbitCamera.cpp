@@ -53,8 +53,8 @@ namespace Engine {
 		float dPitch = 0.0f;
 		float dZoom  = 0.0f;  // positive = zoom out, negative = zoom in
 
-		// --- Desktop mouse: LMB-drag = orbit, scroll wheel = zoom. -----------
-		const bool mouseHeld = Input::IsMouseButtonPressed(0);
+		// --- Desktop mouse: drag-to-orbit (button configurable), scroll = zoom.
+		const bool mouseHeld = Input::IsMouseButtonPressed(m_DragButton);
 		if (mouseHeld) {
 			const auto pos = Input::GetMousePosition();
 			if (!m_MouseDragging) {

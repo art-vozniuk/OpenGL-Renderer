@@ -381,7 +381,34 @@ namespace Engine {
 		m_Count = data.Count();
 		if (m_Count == 0) {
 			WARN_CORE("GaussianSplatRenderer::Upload called with empty dataset");
+			m_AABB = AABB{};
+			m_Centroid = glm::vec3(0.0f);
 			return;
+		}
+
+		// AABB + alpha-weighted centroid (object-space). Computed once per
+		// upload so the editor can place its gizmo at the centroid and do
+		// fast ray-vs-AABB picking without re-scanning N positions.
+		{
+			glm::vec3 mn(std::numeric_limits<float>::max());
+			glm::vec3 mx(-std::numeric_limits<float>::max());
+			glm::dvec3 sum(0.0);
+			size_t kept = 0;
+			for (size_t i = 0; i < m_Count; ++i) {
+				const auto& p = data.positions[i];
+				mn = glm::min(mn, p);
+				mx = glm::max(mx, p);
+				if (data.colors[i].a >= 32) {
+					sum += glm::dvec3(p);
+					++kept;
+				}
+			}
+			if (kept == 0) {
+				for (const auto& p : data.positions) sum += glm::dvec3(p);
+				kept = m_Count;
+			}
+			m_AABB = AABB{ mn, mx, true };
+			m_Centroid = glm::vec3(sum / static_cast<double>(kept));
 		}
 
 		// CPU side: pad vec3 -> vec4 for std430-friendly storage layout.
@@ -538,10 +565,16 @@ namespace Engine {
 
 
 	void GaussianSplatRenderer::EncodeSort(WGPUCommandEncoder encoder,
-	                                        const glm::mat4& viewMatrix,
+	                                        const glm::mat4& viewMatrixIn,
 	                                        const glm::mat4& projectionMatrix)
 	{
 		if (m_Count == 0) return;
+
+		// Compose object-space → view-space in a single matrix so we don't
+		// have to thread `model` through both the WGSL sort and the WGSL
+		// render. Positions in the storage buffer are in object space; the
+		// effective view they're transformed by is (view · model).
+		const glm::mat4 viewMatrix = viewMatrixIn * m_ModelMatrix;
 
 		// Sort-on-stop scheduling (mobile only).
 		//
@@ -870,7 +903,10 @@ namespace Engine {
 		if (m_Count == 0) return;
 
 		RenderUniforms u{};
-		u.view         = camera->GetViewMatrix();
+		// Same trick as EncodeSort: compose view · model on CPU so the
+		// WGSL stays object/model-agnostic. Cov2 picks up the model's
+		// 3×3 rotation+scale through viewRot = mat3(view · model).
+		u.view         = camera->GetViewMatrix() * m_ModelMatrix;
 		u.projection   = camera->GetProjectionMatrix();
 		u.viewportSize = viewportSize;
 		wgpuQueueWriteBuffer(m_Ctx->Queue(), m_RenderUniform, 0, &u, sizeof(u));

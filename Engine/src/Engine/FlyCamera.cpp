@@ -44,7 +44,7 @@ namespace Engine {
 	void FlyCamera::Update(Timestep ts)
 	{
 		// --- Mouse look (instant; no smoothing). ----------------------------
-		const bool mouseHeld = Input::IsMouseButtonPressed(0);
+		const bool mouseHeld = Input::IsMouseButtonPressed(m_DragButton);
 		if (mouseHeld) {
 			const auto pos = Input::GetMousePosition();
 			if (!m_MouseDragging) {

@@ -44,6 +44,12 @@ namespace Engine {
 		const glm::mat4& GetTransform(void) const { return m_Transform; }
 		const SPtr<Camera> GetRenderCamera(void) const { return m_Camera; }
 
+		// Which mouse button has to be held to drag-look. Viewer scenes
+		// keep LMB (0); editor scenes flip to RMB (1) so LMB stays free
+		// for selection / gizmo. Matches GLFW button indices.
+		void SetDragButton(int glfwButton) { m_DragButton = glfwButton; }
+		int  GetDragButton() const { return m_DragButton; }
+
 		// Tunables (units in comments).
 		float m_MaxMoveSpeed   = 4.0f;   // world units / second at full tilt
 		float m_Accel          = 6.0f;   // 1/s — rate constant for velocity easing
@@ -61,6 +67,7 @@ namespace Engine {
 		float m_Yaw   = -90.0f;  // degrees; (yaw=-90, pitch=0) → forward = -Z
 		float m_Pitch = 0.0f;
 
+		int                     m_DragButton    = 0; // GLFW MOUSE_BUTTON_LEFT
 		bool                    m_MouseDragging = false;
 		std::pair<float, float> m_LastMouse{0.0f, 0.0f};
 	};

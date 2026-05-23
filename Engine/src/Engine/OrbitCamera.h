@@ -84,8 +84,15 @@ namespace Engine {
 		float     m_Pitch0  = 0.0f;
 
 		// Mouse-drag bookkeeping.
+		int                     m_DragButton    = 0; // GLFW MOUSE_BUTTON_LEFT
 		bool                    m_MouseDragging = false;
 		std::pair<float, float> m_LastMouse{0.0f, 0.0f};
+
+	public:
+		// Mouse button for orbit drag. Default LMB; editor scenes use RMB
+		// so LMB can drive selection / gizmos. Matches GLFW indices.
+		void SetDragButton(int glfwButton) { m_DragButton = glfwButton; }
+		int  GetDragButton() const { return m_DragButton; }
 	};
 
 }

@@ -44,6 +44,32 @@ namespace Engine {
 		// Reload GPU buffers from a parsed splat dataset. Idempotent.
 		void Upload(const SplatData& data);
 
+		// Per-object model matrix applied at render and sort time. Default
+		// is identity (no transform). When called with a non-identity
+		// matrix, the splat content is translated/rotated/scaled as a
+		// rigid (or affine) body.
+		//
+		// Implementation trick: we don't add a separate `model` uniform
+		// to the WGSL — we pre-multiply `view * model` on the CPU and
+		// pass that as the shader's `view`. Position transform and
+		// covariance rotation both pick up the model automatically
+		// (since cov2 = J · viewRot · cov3 · viewRotᵀ · Jᵀ, and viewRot
+		// becomes view·model's 3×3 part). Saves one matrix uniform and
+		// keeps the WGSL identical between editor and viewer scenes.
+		void SetModelMatrix(const glm::mat4& m) { m_ModelMatrix = m; }
+		const glm::mat4& ModelMatrix() const { return m_ModelMatrix; }
+
+		// Axis-aligned bounding box of the loaded splat cloud in
+		// object-space (i.e. before the model matrix is applied).
+		// Used by the editor for picking and to position the gizmo.
+		// Empty (min > max) when no splat is loaded.
+		struct AABB { glm::vec3 min, max; bool valid = false; };
+		const AABB& BoundingBox() const { return m_AABB; }
+
+		// Object-space centroid of the alpha-weighted point cloud.
+		// Used as the gizmo pivot for newly loaded splats.
+		glm::vec3 Centroid() const { return m_Centroid; }
+
 		// Encode the per-frame sort dispatches into `encoder`. Must run
 		// BEFORE OpenColorPass for the same frame (compute and render
 		// can't share an encoder once a render pass is open). The
@@ -204,6 +230,15 @@ namespace Engine {
 		glm::mat4 m_LastSortedView = glm::mat4(std::numeric_limits<float>::quiet_NaN());
 
 		size_t m_Count = 0;
+
+		// Object-space transform applied on top of the raw splat data.
+		// See SetModelMatrix() for the trick we use to avoid touching WGSL.
+		glm::mat4 m_ModelMatrix = glm::mat4(1.0f);
+
+		// AABB + alpha-weighted centroid of the loaded cloud (object space).
+		// Filled by Upload(); zeroed when no splat loaded.
+		AABB      m_AABB;
+		glm::vec3 m_Centroid = glm::vec3(0.0f);
 
 		// ---- Perf instrumentation ------------------------------------------
 		PerfMetrics m_Metrics;

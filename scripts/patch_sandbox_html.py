@@ -310,6 +310,23 @@ SCRIPT_PATCH = """<script>
       Module.ccall('editor_clear_scene', null, [], []);
       return;
     }
+
+    if (data.type === 'editor-set-tool') {
+      // 0=translate, 1=rotate, 2=scale
+      var tool = (data.tool === 'translate') ? 0
+               : (data.tool === 'rotate')    ? 1
+               : (data.tool === 'scale')     ? 2 : -1;
+      if (tool < 0) return;
+      if (!isReady()) return;
+      Module.ccall('editor_set_tool', null, ['number'], [tool]);
+      return;
+    }
+
+    if (data.type === 'editor-set-snap') {
+      if (!isReady()) return;
+      Module.ccall('editor_set_snap', null, ['number'], [data.on ? 1 : 0]);
+      return;
+    }
   });
 })();
 </script>"""
