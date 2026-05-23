@@ -21,3 +21,5 @@ Sandbox/imgui.ini
 
 # Large Gaussian-splat PLY test scenes — downloaded locally, too big for git.
 assets/splat/*.ply
+
+dev.log

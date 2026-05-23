@@ -7,132 +7,143 @@
 #include "Engine/Renderer/GridRenderer.h"
 #include "Engine/Renderer/GizmoRenderer.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace Sandbox {
 
 	/*
-	 * EditorScene
+	 * EditorScene — 3D editor with multi-object selection and a single
+	 * unified gizmo (translate arrows + rotate rings + scale cubes all
+	 * visible at once, hit-kind determined by which handle the user
+	 * grabs). Fly camera only — no orbit mode here.
 	 *
-	 * 3D editor scene: grid floor, optional Gaussian-splat content, full
-	 * transform gizmos (translate / rotate / scale) on the selected
-	 * object. Mouse:
-	 *   - RMB drag       → camera (fly or orbit, see CameraMode)
-	 *   - LMB click      → select object under cursor (or deselect)
-	 *   - LMB drag on a gizmo axis → modify the selected transform
-	 * Keys: W/E/R switch tool, Tab returns camera to orbit, Ctrl = snap.
+	 * Per-object state (EditorObject) holds an id, display name, splat
+	 * renderer, world transform, world-space AABB, and a visibility
+	 * flag. New objects are loaded via LoadSplatFromBytes(bytes, name)
+	 * and *append* to the scene; nothing is replaced.
 	 *
-	 * Each tool, mode change, drag start/update/end, and selection
-	 * change is posted to the parent frame so the React UI can render
-	 * a numeric HUD + inspector. See EditorScene.cpp for the message
-	 * schema.
+	 * Selection is by object id. Bounding boxes are drawn as corner
+	 * brackets — bright for the selected object, dim for the rest, so
+	 * users always have a visible target to click.
+	 *
+	 * JS bridge — see the extern "C" exports in EditorScene.cpp. Most
+	 * messages carry an `id` for the object they refer to.
 	 */
 	class EditorScene final : public SceneBase
 	{
 	public:
+		using ObjectId = uint64_t;
+
+		struct EditorObject
+		{
+			ObjectId          id   = 0;
+			std::string       name;
+			Engine::Transform transform;
+			bool              visible = true;
+			std::unique_ptr<Engine::GaussianSplatRenderer> splat;
+		};
+
 		EditorScene(float screenWidth, float screenHeight);
 		~EditorScene() override;
 
 		void OnUpdate(Engine::Timestep ts) override;
 
-		// JS bridge entries (see C wrappers at bottom of EditorScene.cpp).
-		void LoadSplatFromBytes(const uint8_t* data, size_t size);
-		void ClearScene();
-		void SetTool(int tool);     // 0=translate, 1=rotate, 2=scale
-		void SetSnap(bool snap);    // snap on/off (overrides Ctrl modifier)
+		// --- JS bridge entry points ------------------------------------------
+		// Load a .splat blob as a NEW object (does not replace existing).
+		// `name` is the display name; pass empty to auto-generate.
+		ObjectId LoadSplatFromBytes(const uint8_t* data, size_t size, const std::string& name);
+		void     DeleteObject(ObjectId id);
+		void     SelectObject(ObjectId id); // 0 = deselect
+		void     FocusObject(ObjectId id);
+		void     RenameObject(ObjectId id, const std::string& name);
+		void     SetVisibility(ObjectId id, bool visible);
+		void     SetSnap(bool snap);
+		void     ClearAll();
 
 		static EditorScene* Current() { return s_Current; }
 
 	private:
-		enum class Tool { Translate = 0, Rotate = 1, Scale = 2 };
-
-		// Which gizmo handle the user is currently hovering / dragging.
-		// 0/1/2 = X/Y/Z axis; 3 = uniform (center for scale, screen-axis
-		// for rotate); -1 = none.
+		// ---- Gizmo hit testing ---------------------------------------------
 		struct GizmoHit
 		{
-			int axis = -1;
+			enum class Kind { None, TranslateAxis, RotateRing, ScaleAxis, ScaleUniform };
+			Kind  kind = Kind::None;
+			int   axis = -1;
 			float distancePx = 1e9f;
 		};
 
-		// Drag state captured at LMB press, used to compute the delta
-		// against the current cursor pos every frame.
 		struct DragState
 		{
 			bool             active = false;
-			Tool             tool   = Tool::Translate;
+			GizmoHit::Kind   kind   = GizmoHit::Kind::None;
 			int              axis   = -1;
+			ObjectId         objectId = 0;
 			glm::vec2        startCursor{0.0f};
 			Engine::Transform startTransform{};
-			float            startProjectionT = 0.0f; // axis t at press (translate)
-			float            startAngleRad    = 0.0f; // initial angle (rotate)
-			float            startDistPx      = 0.0f; // pivot→cursor px (scale)
+			// Pivot captured at LMB press; drag math anchors here for the whole gesture.
+			glm::vec3        dragPivot{0.0f};
+			float            startProjectionT = 0.0f; // translate
+			float            startAngleRad    = 0.0f; // rotate
+			float            currentAngleRad  = 0.0f; // rotate — for arc rendering
+			float            startDistPx      = 0.0f; // scale
 		};
 
-		// --- Per-frame routines ----------------------------------------------
+		// --- Per-frame routines ---------------------------------------------
 		void HandleHotkeys();
-		void HandleMouseInteraction(const glm::vec2& viewport);
+		void HandleMouseInteraction(const glm::vec2& fbViewport);
 
-		void BuildGizmoPrimitives(const glm::vec2& viewport);
+		void BuildSceneGizmos(const glm::vec2& viewport);   // builds bbox + gizmo lines
 
-		// --- Geometry helpers ------------------------------------------------
-		// Pivot in world space = transform.position (gizmo origin).
-		glm::vec3 GizmoPivot() const { return m_Transform.position; }
+		// --- Object management ----------------------------------------------
+		std::string AutoNameFor(const std::string& filenameStem) const;
+		EditorObject* FindObject(ObjectId id);
+		const EditorObject* FindObject(ObjectId id) const;
+		EditorObject* SelectedObject();
 
-		// World-space basis vectors of the current gizmo (always world for
-		// now — local-space toggle is a future iteration).
+		// World-space AABB of `o` (object-space AABB transformed by its model
+		// matrix and refit to axis-aligned).
+		void ComputeWorldAabb(const EditorObject& o, glm::vec3& outMin, glm::vec3& outMax) const;
+		// Visual gizmo pivot: center of the selected object's world AABB.
+		glm::vec3 GizmoPivot() const;
+
 		static glm::vec3 AxisDir(int axis);
+		float            GizmoWorldScale(const Engine::SPtr<Engine::Camera>& cam,
+		                                 const glm::vec3& pivot) const;
 
-		// Constant pixel-size gizmo: scale world-space length so the gizmo
-		// takes a fixed fraction of the screen regardless of distance.
-		float GizmoWorldScale(const Engine::SPtr<Engine::Camera>& cam) const;
-
-		// Ray vs object's loose world-space AABB (transformed by current
-		// model matrix). Returns true if hit.
-		bool RaycastSplat(const glm::vec3& origin, const glm::vec3& dir) const;
-
-		// Try each gizmo handle in screen space; return the closest within
-		// the pixel threshold, or { -1, huge } if nothing close enough.
+		bool RaycastObject(const EditorObject& o, const glm::vec3& origin,
+		                   const glm::vec3& dir, float& outT) const;
+		ObjectId PickObject(const glm::vec3& origin, const glm::vec3& dir) const;
 		GizmoHit PickGizmoHandle(const glm::vec2& cursor,
 		                         const glm::vec2& viewport) const;
 
-		// --- Drag math -------------------------------------------------------
-		void BeginDrag(int axis, const glm::vec2& cursor, const glm::vec2& viewport);
+		void BeginDrag(const GizmoHit& hit, const glm::vec2& cursor,
+		               const glm::vec2& viewport);
 		void UpdateDrag(const glm::vec2& cursor, const glm::vec2& viewport);
 		void EndDrag();
 
 		// --- Posting --------------------------------------------------------
-		void PostTransformUpdate(bool isFinal);
-		void PostToolChanged();
+		void PostObjectsList();
 		void PostSelectionChanged();
+		void PostTransformUpdate(bool isFinal);
 
-		std::unique_ptr<Engine::GridRenderer>          m_Grid;
-		std::unique_ptr<Engine::GaussianSplatRenderer> m_Splats;
-		std::unique_ptr<Engine::GizmoRenderer>         m_Gizmo;
-		size_t                                         m_SplatCount = 0;
+		// --- Scene state -----------------------------------------------------
+		std::vector<EditorObject>             m_Objects;
+		ObjectId                              m_NextId    = 1;
+		ObjectId                              m_Selected  = 0;
+		bool                                  m_SnapToggle = false;
+		GizmoHit                              m_Hover;
+		DragState                             m_Drag;
 
-		Engine::Transform m_Transform;
-		bool              m_HasContent = false;
-		bool              m_Selected   = false;
+		// --- Renderers --------------------------------------------------------
+		std::unique_ptr<Engine::GridRenderer>  m_Grid;
+		std::unique_ptr<Engine::GizmoRenderer> m_Gizmo;
 
-		Tool      m_Tool       = Tool::Translate;
-		bool      m_SnapToggle = false; // toolbar toggle; Ctrl also enables
-		GizmoHit  m_Hover;
-		DragState m_Drag;
-
-		// Edge-detection bookkeeping for mouse / keys.
-		bool      m_PrevLmb    = false;
-		bool      m_PrevW      = false;
-		bool      m_PrevE      = false;
-		bool      m_PrevR      = false;
-		bool      m_PrevTab    = false;
+		// --- Mouse/key edge bookkeeping ---------------------------------------
+		bool      m_PrevLmb           = false;
 		glm::vec2 m_LmbPressCursor{0.0f};
-		bool      m_LmbPressFromGizmo = false;
-
-		double m_PrevFrameStart = 0.0;
-		int    m_FpsCounter     = 0;
-		double m_FpsT0          = 0.0;
 
 		static EditorScene* s_Current;
 	};

@@ -1,10 +1,8 @@
-// Editor gizmo renderer — thick screen-space line segments.
-//
-// One draw call per frame: N line instances, each = 6 vertices (2 tris).
-// The CPU side rebuilds the line buffer every frame from the editor's
-// current tool / selection / hover state. Lines approximate everything
-// the editor needs: translate arrows (line + V tip), rotate rings (many
-// short chords), scale handles (line + wireframe cube).
+// Editor gizmo renderer — thick screen-space line segments with
+// distance-field AA edges. Each line instance = 6 vertices (2 tris)
+// expanded to a perpendicular quad in screen space. The fragment
+// shader smooths the edge over ~1px so the lines look soft instead of
+// stair-stepped.
 
 struct Uniforms {
     viewProj:     mat4x4<f32>,
@@ -17,7 +15,7 @@ struct Line {
     a:     vec4<f32>,
     // xyz = end   world pos, w = unused.
     b:     vec4<f32>,
-    // rgba; a < 1 for dimmed (unselected) handles, hover state sets a = 1.
+    // rgba.
     color: vec4<f32>,
 };
 
@@ -25,8 +23,14 @@ struct Line {
 @group(0) @binding(1) var<storage, read> lines: array<Line>;
 
 struct VsOut {
-    @builtin(position) pos:   vec4<f32>,
-    @location(0)       color: vec4<f32>,
+    @builtin(position) pos:      vec4<f32>,
+    @location(0)       color:    vec4<f32>,
+    // Signed normalized distance from line center across the quad's
+    // short axis. -1 on one edge, +1 on the other, 0 down the middle.
+    @location(1)       sideN:    f32,
+    // Half-thickness in pixels — fragment shader uses it to size the
+    // 1-pixel AA feather correctly regardless of how thick the line is.
+    @location(2)       halfPx:   f32,
 };
 
 @vertex
@@ -39,25 +43,23 @@ fn vs_main(
     let aClip = u.viewProj * vec4<f32>(ln.a.xyz, 1.0);
     let bClip = u.viewProj * vec4<f32>(ln.b.xyz, 1.0);
 
-    // NDC positions of endpoints (post-w divide).
     let aNdc = aClip.xy / aClip.w;
     let bNdc = bClip.xy / bClip.w;
 
-    // Direction in PIXEL space (so the thickness measure is in pixels
-    // regardless of aspect ratio).
+    // Direction in pixel space → thickness is measured in pixels.
     let dirPx = (bNdc - aNdc) * u.viewportSize * 0.5;
     let dirL  = max(length(dirPx), 1e-4);
     let dirN  = dirPx / dirL;
     let perpN = vec2<f32>(-dirN.y, dirN.x);
 
-    // Pixel offset perpendicular to the line, then convert back to NDC.
+    // Pad an extra half-pixel for the AA feather so anti-aliasing has
+    // room to fade. Otherwise the smoothstep would clip at the geometry
+    // edge and we'd get a stair-stepped outline.
     let halfPx     = ln.a.w * 0.5;
-    let perpPx     = perpN * halfPx;
+    let halfPxAA   = halfPx + 1.0;
+    let perpPx     = perpN * halfPxAA;
     let perpNdc    = perpPx * 2.0 / u.viewportSize;
 
-    // Pick endpoint + side per vertex. Quad layout:
-    //   tri 0: (a,-) (b,-) (b,+)
-    //   tri 1: (a,-) (b,+) (a,+)
     var which: u32 = 0u;
     var side:  f32 = -1.0;
     if      (vid == 0u) { which = 0u; side = -1.0; }
@@ -70,9 +72,6 @@ fn vs_main(
     var base: vec4<f32>;
     if (which == 0u) { base = aClip; } else { base = bClip; }
 
-    // Offset is applied pre-perspective-divide, so multiply by base.w
-    // to compensate (so that after the GPU divides by w, the offset is
-    // still `perpNdc * side` in NDC == `perpPx * side` pixels).
     var out: VsOut;
     out.pos = vec4<f32>(
         base.x + perpNdc.x * side * base.w,
@@ -80,11 +79,23 @@ fn vs_main(
         base.z,
         base.w
     );
-    out.color = ln.color;
+    out.color  = ln.color;
+    // Side coord is ±1 at the *padded* edge; the visible-line edge is
+    // at ±halfPx/halfPxAA. fs_main rescales using halfPx.
+    out.sideN  = side * (halfPxAA / max(halfPx, 0.0001));
+    out.halfPx = halfPx;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    // 1-pixel feather measured in normalized side units. Lines thicker
+    // than ~3px get a near-binary edge with a single-pixel soft border;
+    // thin lines fade smoothly across most of their width.
+    let feather = 1.0 / max(in.halfPx, 1.0);
+    let coverage = 1.0 - smoothstep(1.0 - feather, 1.0, abs(in.sideN));
+    if (coverage <= 0.001) {
+        discard;
+    }
+    return vec4<f32>(in.color.rgb, in.color.a * coverage);
 }

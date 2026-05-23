@@ -8,13 +8,13 @@
 #include "Engine/Log.h"
 #include "Engine/Renderer/Renderer.h"
 #include "Engine/Renderer/SplatLoader.h"
-#include "Engine/VirtualInput.h"
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -33,52 +33,67 @@ namespace Sandbox {
 
 	namespace {
 
-		// Default fly-camera spawn — sits above the grid looking forward.
+		// Fly-camera default spawn — above the grid looking forward.
 		const glm::vec3 kSpawnPos     = glm::vec3(0.0f, 2.5f, 6.0f);
 		const glm::vec3 kSpawnForward = glm::normalize(glm::vec3(0.0f, -0.25f, -1.0f));
 
 		// Pixel slop for "click vs drag" and gizmo hover.
 		constexpr float kClickSlopPx     = 4.0f;
-		constexpr float kAxisHitThreshPx = 9.0f;   // axes hover threshold
-		constexpr float kRingHitThreshPx = 7.0f;   // rotate ring slop
+		constexpr float kAxisHitThreshPx = 10.0f;
+		constexpr float kRingHitThreshPx = 8.0f;
+		constexpr float kPointHitThreshPx = 12.0f;
 
-		// Snap steps. The user spec'd 10% for scale; translate / rotate
-		// use the conventional editor defaults.
-		constexpr float kSnapTranslate = 0.25f;          // 25 cm
+		constexpr float kSnapTranslate = 0.25f;
 		constexpr float kSnapRotateRad = glm::radians(15.0f);
-		constexpr float kSnapScale     = 0.10f;          // 10 %
+		constexpr float kSnapScale     = 0.10f;
 
-		// Axis colors (RGBA). Same convention as every editor: X=red,
-		// Y=green, Z=blue. Dimmed when not hovered.
+		// Gizmo geometric ratios. axis_length = world_scale.
+		//   shaft 0..0.70 = translate arrow shaft
+		//   ring radius  = 0.85
+		//   cube center   = 1.00 (with cube side = 0.10)
+		constexpr float kShaftFrac = 0.70f;
+		constexpr float kRingFrac  = 0.85f;
+		constexpr float kCubeFrac  = 1.00f;
+		constexpr float kCubeSize  = 0.10f;
+		constexpr float kCenterCubeSize = 0.08f;
+
+		// Soft (Spline-style) axis colors. R/G/B but less saturated.
 		const glm::vec4 kAxisCol[3] = {
-			glm::vec4(0.95f, 0.30f, 0.30f, 0.85f),
-			glm::vec4(0.40f, 0.90f, 0.40f, 0.85f),
-			glm::vec4(0.30f, 0.55f, 0.95f, 0.85f),
+			glm::vec4(0.88f, 0.38f, 0.42f, 0.95f),  // X — soft red
+			glm::vec4(0.34f, 0.79f, 0.48f, 0.95f),  // Y — soft green
+			glm::vec4(0.35f, 0.55f, 0.94f, 0.95f),  // Z — soft blue
 		};
-		// Highlighted (hover / drag) — same hue, full alpha + boost.
-		glm::vec4 HoverCol(int axis)
+		const glm::vec4 kCenterCol = glm::vec4(0.78f, 0.78f, 0.82f, 0.90f);
+		const glm::vec4 kBboxColSelected   = glm::vec4(0.85f, 0.85f, 0.90f, 0.85f);
+		const glm::vec4 kBboxColUnselected = glm::vec4(0.55f, 0.55f, 0.60f, 0.25f);
+
+		glm::vec4 HoverCol(const glm::vec4& c)
 		{
-			glm::vec4 c = kAxisCol[axis];
-			c.a = 1.0f;
-			c.r = std::min(1.0f, c.r + 0.05f);
-			c.g = std::min(1.0f, c.g + 0.05f);
-			c.b = std::min(1.0f, c.b + 0.05f);
-			return c;
+			return glm::vec4(std::min(1.0f, c.r + 0.06f),
+			                 std::min(1.0f, c.g + 0.06f),
+			                 std::min(1.0f, c.b + 0.06f),
+			                 1.0f);
+		}
+
+		bool LmbDown() { return Input::IsMouseButtonPressed(MOUSE_BUTTON_LEFT); }
+		bool CtrlDown()
+		{
+			return Input::IsKeyPressed(KEY_LEFT_CONTROL)
+			    || Input::IsKeyPressed(KEY_RIGHT_CONTROL);
+		}
+		bool ShiftDown()
+		{
+			return Input::IsKeyPressed(KEY_LEFT_SHIFT)
+			    || Input::IsKeyPressed(KEY_RIGHT_SHIFT);
 		}
 
 		// Cursor + viewport in CSS pixels relative to the canvas.
-		//
-		// We avoid trusting `glfwGetCursorPos` and `m_ScreenWidth/Height`
-		// for hit-testing because their units (drawing-buffer vs CSS)
-		// vary across emscripten GLFW ports, browsers, and DPRs. Instead
-		// we go straight to the DOM: cursor is computed from the last
-		// mousemove relative to canvas.getBoundingClientRect(), and the
-		// viewport size is rect.width/rect.height. Hit tests then work
-		// in plain "pixels the user sees on screen" which always agree
-		// regardless of how the canvas is scaled.
+		// glfwGetCursorPos units vary between GLFW ports and DPRs, so we
+		// read the cursor straight from the DOM via a one-time listener
+		// and rescale via canvas.getBoundingClientRect.
 		struct CursorReading {
-			glm::vec2 cursor   = glm::vec2(0.0f);  // CSS px relative to canvas
-			glm::vec2 viewport = glm::vec2(1.0f);  // canvas CSS size in px
+			glm::vec2 cursor   = glm::vec2(0.0f);
+			glm::vec2 viewport = glm::vec2(1.0f);
 			bool      valid    = false;
 		};
 
@@ -86,11 +101,6 @@ namespace Sandbox {
 		{
 			CursorReading r;
 		#ifdef __EMSCRIPTEN__
-			// EM_ASM splits its body on top-level commas (C preprocessor
-			// arg-parsing), so we wrap multi-statement JS in extra parens
-			// and keep commas inside nested parens (function-call args,
-			// already protected). The state object is assigned member-
-			// by-member to avoid `{x: 0, y: 0}` literals at top level.
 			double cx = 0.0, cy = 0.0, vw = 0.0, vh = 0.0, ok = 0.0;
 			EM_ASM({
 				try {
@@ -124,44 +134,24 @@ namespace Sandbox {
 			return r;
 		}
 
-		bool LmbDown()      { return Input::IsMouseButtonPressed(MOUSE_BUTTON_LEFT); }
-		bool CtrlDown()
-		{
-			return Input::IsKeyPressed(KEY_LEFT_CONTROL)
-			    || Input::IsKeyPressed(KEY_RIGHT_CONTROL);
-		}
-		bool ShiftDown()
-		{
-			return Input::IsKeyPressed(KEY_LEFT_SHIFT)
-			    || Input::IsKeyPressed(KEY_RIGHT_SHIFT);
-		}
-
-		// World position of the camera (inverse of the view matrix' translation).
 		glm::vec3 CameraWorldPos(const SPtr<Camera>& cam)
 		{
 			return glm::vec3(glm::inverse(cam->GetViewMatrix())[3]);
 		}
 
-		// Build a world-space ray from a cursor pixel (top-left origin)
-		// through the camera. Returns (origin, normalized dir).
 		void CursorRay(const SPtr<Camera>& cam, const glm::vec2& cursor,
 		               const glm::vec2& viewport,
 		               glm::vec3& outOrigin, glm::vec3& outDir)
 		{
 			const float ndcX = 2.0f * cursor.x / viewport.x - 1.0f;
 			const float ndcY = 1.0f - 2.0f * cursor.y / viewport.y;
-
 			const glm::mat4 inv = glm::inverse(cam->GetProjectionMatrix() * cam->GetViewMatrix());
 			glm::vec4 nW = inv * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
 			glm::vec4 fW = inv * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
-			const glm::vec3 n3 = glm::vec3(nW) / nW.w;
-			const glm::vec3 f3 = glm::vec3(fW) / fW.w;
-			outOrigin = n3;
-			outDir    = glm::normalize(f3 - n3);
+			outOrigin = glm::vec3(nW) / nW.w;
+			outDir    = glm::normalize(glm::vec3(fW) / fW.w - outOrigin);
 		}
 
-		// Project a world point to viewport pixels (top-left origin). Returns
-		// false if the point is behind the camera or w == 0.
 		bool ProjectToScreen(const glm::vec3& world,
 		                     const SPtr<Camera>& cam,
 		                     const glm::vec2& viewport,
@@ -177,7 +167,6 @@ namespace Sandbox {
 			return true;
 		}
 
-		// 2D pixel distance from `p` to segment (a,b).
 		float DistPointSegment(const glm::vec2& p, const glm::vec2& a, const glm::vec2& b)
 		{
 			const glm::vec2 ab = b - a;
@@ -188,9 +177,6 @@ namespace Sandbox {
 			return glm::length(p - (a + ab * t));
 		}
 
-		// Closest point parameter t along axis line `o + d * t` to a ray.
-		// Both d and rayDir should be unit vectors. Caller has to guard
-		// against the parallel case (denom ≈ 0).
 		bool ClosestAxisParam(const glm::vec3& rayOrigin, const glm::vec3& rayDir,
 		                      const glm::vec3& axisOrigin, const glm::vec3& axisDir,
 		                      float& outT)
@@ -207,50 +193,43 @@ namespace Sandbox {
 			return true;
 		}
 
-		// Ray-plane intersect. Plane through `p0` with normal `n` (unit).
-		// Returns true and writes hit position if the ray hits in front.
 		bool RayPlane(const glm::vec3& rayOrigin, const glm::vec3& rayDir,
 		              const glm::vec3& p0, const glm::vec3& n,
-		              glm::vec3& outHit)
+		              glm::vec3& outHit, float& outT)
 		{
 			const float denom = glm::dot(rayDir, n);
 			if (std::abs(denom) < 1e-6f) return false;
 			const float t = glm::dot(p0 - rayOrigin, n) / denom;
 			if (t < 0.0f) return false;
 			outHit = rayOrigin + rayDir * t;
+			outT = t;
 			return true;
 		}
 
-		// Snap helpers — round to nearest step, returning the snapped value.
 		float SnapTo(float v, float step) { return std::round(v / step) * step; }
 
-		void TransformAABB(const GaussianSplatRenderer::AABB& in,
+		void TransformAabb(const GaussianSplatRenderer::AABB& in,
 		                   const glm::mat4& m,
 		                   glm::vec3& outMin, glm::vec3& outMax)
 		{
-			// Transform the 8 corners and refit. Loose but cheap.
 			const glm::vec3 corners[8] = {
-				{ in.min.x, in.min.y, in.min.z },
-				{ in.max.x, in.min.y, in.min.z },
-				{ in.min.x, in.max.y, in.min.z },
-				{ in.max.x, in.max.y, in.min.z },
-				{ in.min.x, in.min.y, in.max.z },
-				{ in.max.x, in.min.y, in.max.z },
-				{ in.min.x, in.max.y, in.max.z },
-				{ in.max.x, in.max.y, in.max.z },
+				{ in.min.x, in.min.y, in.min.z }, { in.max.x, in.min.y, in.min.z },
+				{ in.min.x, in.max.y, in.min.z }, { in.max.x, in.max.y, in.min.z },
+				{ in.min.x, in.min.y, in.max.z }, { in.max.x, in.min.y, in.max.z },
+				{ in.min.x, in.max.y, in.max.z }, { in.max.x, in.max.y, in.max.z },
 			};
 			outMin = glm::vec3( std::numeric_limits<float>::max());
 			outMax = glm::vec3(-std::numeric_limits<float>::max());
 			for (int i = 0; i < 8; ++i) {
 				const glm::vec4 w = m * glm::vec4(corners[i], 1.0f);
-				const glm::vec3 p = glm::vec3(w);
+				const glm::vec3 p(w);
 				outMin = glm::min(outMin, p);
 				outMax = glm::max(outMax, p);
 			}
 		}
 
 		bool RayAabb(const glm::vec3& origin, const glm::vec3& dir,
-		             const glm::vec3& mn, const glm::vec3& mx)
+		             const glm::vec3& mn, const glm::vec3& mx, float& outT)
 		{
 			float tmin = -std::numeric_limits<float>::max();
 			float tmax =  std::numeric_limits<float>::max();
@@ -267,7 +246,45 @@ namespace Sandbox {
 				tmax = std::min(tmax, t2);
 				if (tmin > tmax) return false;
 			}
-			return tmax >= 0.0f;
+			outT = tmin >= 0.0f ? tmin : tmax;
+			return outT >= 0.0f;
+		}
+
+		// Filename helpers. Strip extension and any path prefix from a name
+		// like "/tmp/cat.splat" → "cat".
+		std::string StripFilename(const std::string& s)
+		{
+			auto slash = s.find_last_of("/\\");
+			std::string base = (slash == std::string::npos) ? s : s.substr(slash + 1);
+			auto dot = base.find_last_of('.');
+			return (dot == std::string::npos) ? base : base.substr(0, dot);
+		}
+
+		// Build a TRS-aware AABB-corner-bracket primitive: short L-shapes
+		// at every corner, pointing inward along each axis. `bracketLen`
+		// is the world-space length of each L arm.
+		void AddCornerBrackets(GizmoRenderer& giz,
+		                       const glm::vec3& mn, const glm::vec3& mx,
+		                       const glm::vec4& col, float thickness)
+		{
+			const glm::vec3 ext = mx - mn;
+			const float bracketLen = std::min({ext.x, ext.y, ext.z}) * 0.18f;
+
+			for (int cz = 0; cz < 2; ++cz) {
+			for (int cy = 0; cy < 2; ++cy) {
+			for (int cx = 0; cx < 2; ++cx) {
+				const glm::vec3 corner(
+					cx ? mx.x : mn.x,
+					cy ? mx.y : mn.y,
+					cz ? mx.z : mn.z);
+				// Direction TOWARD the opposite corner along each axis.
+				const glm::vec3 dirX = glm::vec3(cx ? -1.0f : 1.0f, 0.0f, 0.0f);
+				const glm::vec3 dirY = glm::vec3(0.0f, cy ? -1.0f : 1.0f, 0.0f);
+				const glm::vec3 dirZ = glm::vec3(0.0f, 0.0f, cz ? -1.0f : 1.0f);
+				giz.AddLine(corner, corner + dirX * bracketLen, col, thickness);
+				giz.AddLine(corner, corner + dirY * bracketLen, col, thickness);
+				giz.AddLine(corner, corner + dirZ * bracketLen, col, thickness);
+			}}}
 		}
 
 	} // namespace
@@ -284,91 +301,11 @@ namespace Sandbox {
 	}
 
 
-	float EditorScene::GizmoWorldScale(const SPtr<Camera>& cam) const
+	float EditorScene::GizmoWorldScale(const SPtr<Camera>& cam, const glm::vec3& pivot) const
 	{
-		// Distance from camera to gizmo pivot — gizmo grows / shrinks
-		// linearly with distance so it stays the same pixel size on
-		// screen regardless of camera zoom.
 		const glm::vec3 camPos = CameraWorldPos(cam);
-		const float dist = glm::length(camPos - GizmoPivot());
-		// 0.18 ≈ takes ~25 % of viewport vertical at a 45° fovy.
+		const float dist = glm::length(camPos - pivot);
 		return std::max(0.05f, dist * 0.18f);
-	}
-
-
-	bool EditorScene::RaycastSplat(const glm::vec3& origin, const glm::vec3& dir) const
-	{
-		if (!m_Splats || !m_Splats->BoundingBox().valid) return false;
-		glm::vec3 mn, mx;
-		TransformAABB(m_Splats->BoundingBox(), m_Transform.Matrix(), mn, mx);
-		return RayAabb(origin, dir, mn, mx);
-	}
-
-
-	EditorScene::GizmoHit EditorScene::PickGizmoHandle(const glm::vec2& cursor,
-	                                                   const glm::vec2& viewport) const
-	{
-		GizmoHit best{};
-		if (!m_Selected || !m_HasContent) return best;
-
-		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
-		const glm::vec3 pivot = GizmoPivot();
-		const float worldScale = GizmoWorldScale(cam);
-
-		glm::vec2 pivotPx;
-		const bool pivotVisible = ProjectToScreen(pivot, cam, viewport, pivotPx);
-
-		auto considerAxis = [&](int axis, float distPx, float threshold) {
-			if (distPx < threshold && distPx < best.distancePx) {
-				best.axis = axis;
-				best.distancePx = distPx;
-			}
-		};
-
-		if (m_Tool == Tool::Translate || m_Tool == Tool::Scale) {
-			// 3 axes — line segment hit test in pixel space.
-			for (int axis = 0; axis < 3; ++axis) {
-				const glm::vec3 tip = pivot + AxisDir(axis) * worldScale;
-				glm::vec2 tipPx;
-				if (!pivotVisible) continue;
-				if (!ProjectToScreen(tip, cam, viewport, tipPx)) continue;
-				const float d = DistPointSegment(cursor, pivotPx, tipPx);
-				considerAxis(axis, d, kAxisHitThreshPx);
-			}
-		} else { // Rotate
-			// For each axis, sample N points around the ring and find
-			// minimum pixel distance.
-			constexpr int kSamples = 48;
-			for (int axis = 0; axis < 3; ++axis) {
-				const glm::vec3 a = AxisDir(axis);
-				// Build orthonormal basis in the ring plane.
-				const glm::vec3 u =
-					(std::abs(a.x) < 0.5f) ? glm::normalize(glm::cross(a, glm::vec3(1,0,0)))
-					                       : glm::normalize(glm::cross(a, glm::vec3(0,1,0)));
-				const glm::vec3 v = glm::normalize(glm::cross(a, u));
-				glm::vec2 prev{};
-				bool havePrev = false;
-				for (int i = 0; i <= kSamples; ++i) {
-					const float t = float(i) / float(kSamples);
-					const float ang = t * glm::two_pi<float>();
-					const glm::vec3 wp = pivot
-						+ (std::cos(ang) * u + std::sin(ang) * v) * worldScale;
-					glm::vec2 px;
-					if (!ProjectToScreen(wp, cam, viewport, px)) {
-						havePrev = false;
-						continue;
-					}
-					if (havePrev) {
-						const float d = DistPointSegment(cursor, prev, px);
-						considerAxis(axis, d, kRingHitThreshPx);
-					}
-					prev = px;
-					havePrev = true;
-				}
-			}
-		}
-
-		return best;
 	}
 
 
@@ -376,12 +313,7 @@ namespace Sandbox {
 		: SceneBase("editor", screenWidth, screenHeight)
 	{
 		s_Current = this;
-
-		// Editor convention: RMB drives the camera so LMB stays free for
-		// selection / gizmo. SceneBase reads this when spawning cameras.
 		m_CameraConfig.dragButton = MOUSE_BUTTON_RIGHT;
-
-		// Fly by default — orbit needs a subject and the scene starts empty.
 		SwitchCameraToFly(kSpawnPos, kSpawnForward);
 
 		m_Grid  = std::make_unique<GridRenderer>(Application::Get().GetGfx());
@@ -389,9 +321,9 @@ namespace Sandbox {
 
 		INFO_CORE("EditorScene: ready (empty, fly-cam @ ({0:.2f},{1:.2f},{2:.2f}); RMB=camera)",
 		          kSpawnPos.x, kSpawnPos.y, kSpawnPos.z);
-
 		PostSceneMessage("{\"type\":\"splat-ready\"}");
 		PostSceneMessage("{\"type\":\"editor-ready\"}");
+		PostObjectsList();
 	}
 
 
@@ -401,130 +333,211 @@ namespace Sandbox {
 	}
 
 
-	void EditorScene::HandleHotkeys()
+	// --- Object book-keeping ---------------------------------------------------
+
+	EditorScene::EditorObject* EditorScene::FindObject(ObjectId id)
 	{
-		// W/E/R switch tool (rising edge).
-		const bool w = Input::IsKeyPressed(KEY_W);
-		const bool e = Input::IsKeyPressed(KEY_E);
-		const bool r = Input::IsKeyPressed(KEY_R);
-
-		// Don't steal WASDEQ when the RMB camera is being used — pressing
-		// W while flying shouldn't pop the user out of fly mode by
-		// switching tools. We detect "camera using WASDEQ" by RMB held.
-		const bool rmbHeld = Input::IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
-
-		if (!rmbHeld) {
-			if (w && !m_PrevW) { m_Tool = Tool::Translate; PostToolChanged(); }
-			if (e && !m_PrevE) { m_Tool = Tool::Rotate;    PostToolChanged(); }
-			if (r && !m_PrevR) { m_Tool = Tool::Scale;     PostToolChanged(); }
-		}
-		m_PrevW = w; m_PrevE = e; m_PrevR = r;
-
-		// Tab → toggle fly ↔ orbit. The arbitration helper handles JS-bridge
-		// requests; Tab is the editor-only keyboard alternative.
-		const bool tab = Input::IsKeyPressed(KEY_TAB);
-		if (tab && !m_PrevTab) {
-			const Engine::PoseSnapshot s = m_Camera->Snapshot();
-			if (m_Camera->Mode() == Engine::CameraMode::Fly) {
-				SwitchCameraToOrbit(s.orbitTarget, s.position);
-			} else {
-				SwitchCameraToFly(s.position, s.forward);
-			}
-		}
-		m_PrevTab = tab;
+		for (auto& o : m_Objects) if (o.id == id) return &o;
+		return nullptr;
+	}
+	const EditorScene::EditorObject* EditorScene::FindObject(ObjectId id) const
+	{
+		for (const auto& o : m_Objects) if (o.id == id) return &o;
+		return nullptr;
+	}
+	EditorScene::EditorObject* EditorScene::SelectedObject()
+	{
+		return m_Selected ? FindObject(m_Selected) : nullptr;
 	}
 
 
-	void EditorScene::HandleMouseInteraction(const glm::vec2& fbViewport)
+	std::string EditorScene::AutoNameFor(const std::string& filenameStem) const
 	{
-		// Hit tests happen in CSS pixels (what the user sees), not in
-		// the drawing-buffer pixels we use for rendering. ReadCursorCss
-		// returns both cursor and viewport in that CSS frame, so cursor
-		// (0..rect.width) and ProjectToScreen output (also computed against
-		// rect.width) line up regardless of DPR or canvas CSS scaling.
-		// Native build falls back to GLFW + the drawing-buffer viewport.
-		const auto reading = ReadCursorCss();
-		glm::vec2 cursor   = reading.valid ? reading.cursor   : glm::vec2(0.0f);
-		glm::vec2 viewport = reading.valid ? reading.viewport : fbViewport;
-		if (!reading.valid) {
-			const auto p = Input::GetMousePosition();
-			cursor = glm::vec2(p.first, p.second);
+		std::string base = filenameStem.empty() ? std::string("object") : filenameStem;
+		// Walk indices until we find an unused name.
+		auto exists = [&](const std::string& n) {
+			for (const auto& o : m_Objects) if (o.name == n) return true;
+			return false;
+		};
+		if (!exists(base)) return base;
+		for (int i = 2; i < 9999; ++i) {
+			char buf[64];
+			std::snprintf(buf, sizeof(buf), "%s (%d)", base.c_str(), i);
+			std::string candidate(buf);
+			if (!exists(candidate)) return candidate;
 		}
-		const bool lmb = LmbDown();
-
-		// Hover update (every frame while not dragging).
-		if (!m_Drag.active) {
-			m_Hover = PickGizmoHandle(cursor, viewport);
-		}
-
-		// LMB press edge.
-		if (lmb && !m_PrevLmb) {
-			m_LmbPressCursor       = cursor;
-			m_LmbPressFromGizmo    = (m_Hover.axis >= 0);
-			if (m_LmbPressFromGizmo) {
-				BeginDrag(m_Hover.axis, cursor, viewport);
-			}
-		}
-
-		// LMB drag (held + moved).
-		if (lmb && m_Drag.active) {
-			UpdateDrag(cursor, viewport);
-		}
-
-		// LMB release edge.
-		if (!lmb && m_PrevLmb) {
-			if (m_Drag.active) {
-				EndDrag();
-			} else if (glm::length(cursor - m_LmbPressCursor) < kClickSlopPx) {
-				// Plain click — selection toggle.
-				glm::vec3 o, d;
-				CursorRay(m_Camera->GetRenderCamera(), cursor, viewport, o, d);
-				const bool hit = RaycastSplat(o, d);
-				const bool wasSelected = m_Selected;
-				m_Selected = hit;
-				if (m_Selected != wasSelected) PostSelectionChanged();
-			}
-		}
-
-		m_PrevLmb = lmb;
+		return base + " (?)";
 	}
 
 
-	void EditorScene::BeginDrag(int axis, const glm::vec2& cursor, const glm::vec2& viewport)
+	void EditorScene::ComputeWorldAabb(const EditorObject& o,
+	                                   glm::vec3& outMin, glm::vec3& outMax) const
 	{
-		m_Drag.active         = true;
-		m_Drag.tool           = m_Tool;
-		m_Drag.axis           = axis;
-		m_Drag.startCursor    = cursor;
-		m_Drag.startTransform = m_Transform;
+		if (!o.splat || !o.splat->BoundingBox().valid) {
+			outMin = outMax = glm::vec3(0.0f);
+			return;
+		}
+		TransformAabb(o.splat->BoundingBox(), o.transform.Matrix(), outMin, outMax);
+	}
+
+
+	glm::vec3 EditorScene::GizmoPivot() const
+	{
+		const auto* o = FindObject(m_Selected);
+		if (!o || !o->splat) return glm::vec3(0.0f);
+		glm::vec3 mn, mx;
+		ComputeWorldAabb(*o, mn, mx);
+		return (mn + mx) * 0.5f;
+	}
+
+
+	// --- Picking ---------------------------------------------------------------
+
+	bool EditorScene::RaycastObject(const EditorObject& o, const glm::vec3& origin,
+	                                const glm::vec3& dir, float& outT) const
+	{
+		if (!o.splat || !o.splat->BoundingBox().valid) return false;
+		glm::vec3 mn, mx;
+		ComputeWorldAabb(o, mn, mx);
+		return RayAabb(origin, dir, mn, mx, outT);
+	}
+
+
+	EditorScene::ObjectId EditorScene::PickObject(const glm::vec3& origin,
+	                                              const glm::vec3& dir) const
+	{
+		ObjectId best     = 0;
+		float    bestT    = std::numeric_limits<float>::max();
+		for (const auto& o : m_Objects) {
+			if (!o.visible) continue;
+			float t = 0.0f;
+			if (RaycastObject(o, origin, dir, t) && t < bestT) {
+				bestT = t;
+				best  = o.id;
+			}
+		}
+		return best;
+	}
+
+
+	EditorScene::GizmoHit EditorScene::PickGizmoHandle(const glm::vec2& cursor,
+	                                                   const glm::vec2& viewport) const
+	{
+		GizmoHit best;
+		if (!m_Selected) return best;
 
 		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
+		const glm::vec3 pivot = GizmoPivot();
+		const float L = GizmoWorldScale(cam, pivot);
 
-		if (m_Tool == Tool::Translate) {
-			glm::vec3 o, d;
-			CursorRay(cam, cursor, viewport, o, d);
-			const glm::vec3 axisDir = AxisDir(axis);
-			float t = 0.0f;
-			ClosestAxisParam(o, d, GizmoPivot(), axisDir, t);
-			m_Drag.startProjectionT = t;
-		} else if (m_Tool == Tool::Rotate) {
-			glm::vec3 o, d;
-			CursorRay(cam, cursor, viewport, o, d);
-			const glm::vec3 axisDir = AxisDir(axis);
-			glm::vec3 hit;
-			if (RayPlane(o, d, GizmoPivot(), axisDir, hit)) {
-				const glm::vec3 u = (std::abs(axisDir.x) < 0.5f)
-					? glm::normalize(glm::cross(axisDir, glm::vec3(1, 0, 0)))
-					: glm::normalize(glm::cross(axisDir, glm::vec3(0, 1, 0)));
-				const glm::vec3 v = glm::normalize(glm::cross(axisDir, u));
-				const glm::vec3 r = hit - GizmoPivot();
-				m_Drag.startAngleRad = std::atan2(glm::dot(r, v), glm::dot(r, u));
-			} else {
-				m_Drag.startAngleRad = 0.0f;
+		glm::vec2 pivotPx;
+		if (!ProjectToScreen(pivot, cam, viewport, pivotPx)) return best;
+
+		auto consider = [&](GizmoHit::Kind k, int axis, float dPx, float thresh) {
+			if (dPx < thresh && dPx < best.distancePx) {
+				best.kind = k;
+				best.axis = axis;
+				best.distancePx = dPx;
 			}
-		} else { // Scale
+		};
+
+		// Translate arrow stems: pivot → pivot + axis * L * kShaftFrac.
+		for (int a = 0; a < 3; ++a) {
+			const glm::vec3 tip = pivot + AxisDir(a) * L * kShaftFrac;
+			glm::vec2 tipPx;
+			if (!ProjectToScreen(tip, cam, viewport, tipPx)) continue;
+			const float d = DistPointSegment(cursor, pivotPx, tipPx);
+			consider(GizmoHit::Kind::TranslateAxis, a, d, kAxisHitThreshPx);
+		}
+
+		// Rotate rings: project ~48 sample points and find closest chord.
+		constexpr int kRingSamples = 48;
+		for (int a = 0; a < 3; ++a) {
+			const glm::vec3 axis = AxisDir(a);
+			const glm::vec3 u =
+				(std::abs(axis.x) < 0.5f) ? glm::normalize(glm::cross(axis, glm::vec3(1, 0, 0)))
+				                          : glm::normalize(glm::cross(axis, glm::vec3(0, 1, 0)));
+			const glm::vec3 v = glm::normalize(glm::cross(axis, u));
+			glm::vec2 prev{};
+			bool havePrev = false;
+			for (int i = 0; i <= kRingSamples; ++i) {
+				const float t = float(i) / float(kRingSamples);
+				const float ang = t * glm::two_pi<float>();
+				const glm::vec3 wp = pivot
+					+ (std::cos(ang) * u + std::sin(ang) * v) * (L * kRingFrac);
+				glm::vec2 px;
+				if (!ProjectToScreen(wp, cam, viewport, px)) {
+					havePrev = false;
+					continue;
+				}
+				if (havePrev) {
+					consider(GizmoHit::Kind::RotateRing, a,
+					         DistPointSegment(cursor, prev, px), kRingHitThreshPx);
+				}
+				prev = px;
+				havePrev = true;
+			}
+		}
+
+		// Scale cubes: distance to projected cube center.
+		for (int a = 0; a < 3; ++a) {
+			const glm::vec3 c = pivot + AxisDir(a) * L * kCubeFrac;
+			glm::vec2 px;
+			if (!ProjectToScreen(c, cam, viewport, px)) continue;
+			consider(GizmoHit::Kind::ScaleAxis, a, glm::length(cursor - px), kPointHitThreshPx);
+		}
+
+		// Center cube (uniform scale).
+		consider(GizmoHit::Kind::ScaleUniform, 3, glm::length(cursor - pivotPx), kPointHitThreshPx);
+
+		return best;
+	}
+
+
+	// --- Drag ------------------------------------------------------------------
+
+	void EditorScene::BeginDrag(const GizmoHit& hit, const glm::vec2& cursor,
+	                            const glm::vec2& viewport)
+	{
+		auto* o = SelectedObject();
+		if (!o || hit.kind == GizmoHit::Kind::None) return;
+
+		m_Drag.active         = true;
+		m_Drag.kind           = hit.kind;
+		m_Drag.axis           = hit.axis;
+		m_Drag.objectId       = o->id;
+		m_Drag.startCursor    = cursor;
+		m_Drag.startTransform = o->transform;
+
+		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
+		// Freeze pivot for the gesture — BeginDrag and UpdateDrag must agree.
+		const glm::vec3 pivot = GizmoPivot();
+		m_Drag.dragPivot = pivot;
+
+		if (hit.kind == GizmoHit::Kind::TranslateAxis) {
+			glm::vec3 ro, rd;
+			CursorRay(cam, cursor, viewport, ro, rd);
+			float t = 0.0f;
+			ClosestAxisParam(ro, rd, pivot, AxisDir(hit.axis), t);
+			m_Drag.startProjectionT = t;
+		} else if (hit.kind == GizmoHit::Kind::RotateRing) {
+			glm::vec3 ro, rd;
+			CursorRay(cam, cursor, viewport, ro, rd);
+			const glm::vec3 axis = AxisDir(hit.axis);
+			glm::vec3 hp; float dt;
+			if (RayPlane(ro, rd, pivot, axis, hp, dt)) {
+				const glm::vec3 u = (std::abs(axis.x) < 0.5f)
+					? glm::normalize(glm::cross(axis, glm::vec3(1, 0, 0)))
+					: glm::normalize(glm::cross(axis, glm::vec3(0, 1, 0)));
+				const glm::vec3 v = glm::normalize(glm::cross(axis, u));
+				const glm::vec3 r = hp - pivot;
+				m_Drag.startAngleRad = std::atan2(glm::dot(r, v), glm::dot(r, u));
+				m_Drag.currentAngleRad = m_Drag.startAngleRad;
+			}
+		} else if (hit.kind == GizmoHit::Kind::ScaleAxis
+		        || hit.kind == GizmoHit::Kind::ScaleUniform) {
 			glm::vec2 pivotPx;
-			ProjectToScreen(GizmoPivot(), cam, viewport, pivotPx);
+			ProjectToScreen(pivot, cam, viewport, pivotPx);
 			m_Drag.startDistPx = std::max(1.0f, glm::length(cursor - pivotPx));
 		}
 
@@ -534,55 +547,60 @@ namespace Sandbox {
 
 	void EditorScene::UpdateDrag(const glm::vec2& cursor, const glm::vec2& viewport)
 	{
+		auto* o = FindObject(m_Drag.objectId);
+		if (!o) { m_Drag.active = false; return; }
+
 		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
+		const glm::vec3 pivot0 = m_Drag.dragPivot;
 		const bool snap = m_SnapToggle || CtrlDown();
 
-		if (m_Drag.tool == Tool::Translate) {
-			glm::vec3 o, d;
-			CursorRay(cam, cursor, viewport, o, d);
+		if (m_Drag.kind == GizmoHit::Kind::TranslateAxis) {
+			glm::vec3 ro, rd;
+			CursorRay(cam, cursor, viewport, ro, rd);
 			const glm::vec3 axisDir = AxisDir(m_Drag.axis);
 			float t = 0.0f;
-			if (!ClosestAxisParam(o, d, m_Drag.startTransform.position, axisDir, t)) return;
+			if (!ClosestAxisParam(ro, rd, pivot0, axisDir, t)) return;
 			float delta = t - m_Drag.startProjectionT;
 			if (snap) delta = SnapTo(delta, kSnapTranslate);
-			m_Transform.position = m_Drag.startTransform.position + axisDir * delta;
-		} else if (m_Drag.tool == Tool::Rotate) {
-			glm::vec3 o, d;
-			CursorRay(cam, cursor, viewport, o, d);
-			const glm::vec3 axisDir = AxisDir(m_Drag.axis);
-			glm::vec3 hit;
-			if (!RayPlane(o, d, m_Drag.startTransform.position, axisDir, hit)) return;
-			const glm::vec3 u = (std::abs(axisDir.x) < 0.5f)
-				? glm::normalize(glm::cross(axisDir, glm::vec3(1, 0, 0)))
-				: glm::normalize(glm::cross(axisDir, glm::vec3(0, 1, 0)));
-			const glm::vec3 v = glm::normalize(glm::cross(axisDir, u));
-			const glm::vec3 r = hit - m_Drag.startTransform.position;
+			o->transform.position = m_Drag.startTransform.position + axisDir * delta;
+		} else if (m_Drag.kind == GizmoHit::Kind::RotateRing) {
+			glm::vec3 ro, rd;
+			CursorRay(cam, cursor, viewport, ro, rd);
+			const glm::vec3 axis = AxisDir(m_Drag.axis);
+			glm::vec3 hp; float dt;
+			if (!RayPlane(ro, rd, pivot0, axis, hp, dt)) return;
+			const glm::vec3 u = (std::abs(axis.x) < 0.5f)
+				? glm::normalize(glm::cross(axis, glm::vec3(1, 0, 0)))
+				: glm::normalize(glm::cross(axis, glm::vec3(0, 1, 0)));
+			const glm::vec3 v = glm::normalize(glm::cross(axis, u));
+			const glm::vec3 r = hp - pivot0;
 			const float ang = std::atan2(glm::dot(r, v), glm::dot(r, u));
 			float delta = ang - m_Drag.startAngleRad;
+			// Keep delta in (-π, π] so swinging past the ±π seam doesn't
+			// rotate the object by ~2π in the wrong direction.
+			while (delta >  glm::pi<float>()) delta -= glm::two_pi<float>();
+			while (delta < -glm::pi<float>()) delta += glm::two_pi<float>();
 			if (snap) delta = SnapTo(delta, kSnapRotateRad);
-			const glm::quat dq = glm::angleAxis(delta, glm::normalize(axisDir));
-			m_Transform.rotation = glm::normalize(dq * m_Drag.startTransform.rotation);
-		} else { // Scale
+			m_Drag.currentAngleRad = m_Drag.startAngleRad + delta;
+			const glm::quat dq = glm::angleAxis(delta, glm::normalize(axis));
+			o->transform.rotation = glm::normalize(dq * m_Drag.startTransform.rotation);
+		} else if (m_Drag.kind == GizmoHit::Kind::ScaleAxis
+		        || m_Drag.kind == GizmoHit::Kind::ScaleUniform) {
 			glm::vec2 pivotPx;
-			if (!ProjectToScreen(GizmoPivot(), cam, viewport, pivotPx)) return;
+			if (!ProjectToScreen(pivot0, cam, viewport, pivotPx)) return;
 			float currDist = std::max(1.0f, glm::length(cursor - pivotPx));
-			float factor   = currDist / m_Drag.startDistPx;
+			float factor = currDist / m_Drag.startDistPx;
 			if (snap) factor = std::max(0.01f, SnapTo(factor, kSnapScale));
-
-			// Reset to start, then apply ratio to chosen axis (or all).
-			m_Transform.scale = m_Drag.startTransform.scale;
-			if (ShiftDown()) {
-				// Uniform scale on Shift (Unity-style modifier).
-				m_Transform.scale *= factor;
+			o->transform.scale = m_Drag.startTransform.scale;
+			if (m_Drag.kind == GizmoHit::Kind::ScaleUniform || ShiftDown()) {
+				o->transform.scale *= factor;
 			} else {
-				const int a = m_Drag.axis;
-				m_Transform.scale[a] = m_Drag.startTransform.scale[a] * factor;
+				o->transform.scale[m_Drag.axis] =
+					m_Drag.startTransform.scale[m_Drag.axis] * factor;
 			}
 		}
 
-		// Apply transform to the splat renderer every drag tick — the
-		// model matrix is what gives the user the live visual feedback.
-		if (m_Splats) m_Splats->SetModelMatrix(m_Transform.Matrix());
+		if (o->splat) o->splat->SetModelMatrix(o->transform.Matrix());
 		PostTransformUpdate(false);
 	}
 
@@ -590,44 +608,159 @@ namespace Sandbox {
 	void EditorScene::EndDrag()
 	{
 		m_Drag.active = false;
-		m_Drag.axis   = -1;
 		PostTransformUpdate(true);
 	}
 
 
-	void EditorScene::BuildGizmoPrimitives(const glm::vec2& /*viewport*/)
+	// --- Per-frame -------------------------------------------------------------
+
+	void EditorScene::HandleHotkeys()
+	{
+		// Delete key removes the selected object — handy when the table
+		// row isn't focused (React panel sends a JS-bridge message in
+		// that case; this is the in-canvas fallback).
+		static bool prevDelete = false;
+		const bool del = Input::IsKeyPressed(KEY_DELETE) || Input::IsKeyPressed(KEY_BACKSPACE);
+		if (del && !prevDelete && m_Selected) {
+			DeleteObject(m_Selected);
+		}
+		prevDelete = del;
+	}
+
+
+	void EditorScene::HandleMouseInteraction(const glm::vec2& fbViewport)
+	{
+		const auto reading = ReadCursorCss();
+		glm::vec2 cursor   = reading.valid ? reading.cursor   : glm::vec2(0.0f);
+		glm::vec2 viewport = reading.valid ? reading.viewport : fbViewport;
+		if (!reading.valid) {
+			const auto p = Input::GetMousePosition();
+			cursor = glm::vec2(p.first, p.second);
+		}
+		const bool lmb = LmbDown();
+
+		// Hover update while not dragging.
+		if (!m_Drag.active) m_Hover = PickGizmoHandle(cursor, viewport);
+
+		// LMB press.
+		if (lmb && !m_PrevLmb) {
+			m_LmbPressCursor = cursor;
+			if (m_Hover.kind != GizmoHit::Kind::None) {
+				BeginDrag(m_Hover, cursor, viewport);
+			}
+		}
+
+		// LMB drag.
+		if (lmb && m_Drag.active) UpdateDrag(cursor, viewport);
+
+		// LMB release.
+		if (!lmb && m_PrevLmb) {
+			if (m_Drag.active) {
+				EndDrag();
+			} else if (glm::length(cursor - m_LmbPressCursor) < kClickSlopPx) {
+				// Plain click — pick under cursor.
+				glm::vec3 o, d;
+				CursorRay(m_Camera->GetRenderCamera(), cursor, viewport, o, d);
+				const ObjectId picked = PickObject(o, d);
+				if (picked != m_Selected) {
+					m_Selected = picked;
+					PostSelectionChanged();
+				}
+			}
+		}
+		m_PrevLmb = lmb;
+	}
+
+
+	void EditorScene::BuildSceneGizmos(const glm::vec2& /*viewport*/)
 	{
 		m_Gizmo->Clear();
-		if (!m_Selected || !m_HasContent) return;
+		if (m_Objects.empty()) return;
+
+		// Bounding-box corner brackets per object.
+		for (const auto& o : m_Objects) {
+			if (!o.splat || !o.visible) continue;
+			glm::vec3 mn, mx;
+			ComputeWorldAabb(o, mn, mx);
+			const bool sel = (o.id == m_Selected);
+			AddCornerBrackets(*m_Gizmo, mn, mx,
+			                  sel ? kBboxColSelected : kBboxColUnselected,
+			                  sel ? 2.0f : 1.5f);
+		}
+
+		// Transform gizmo on the selected object.
+		const auto* sel = FindObject(m_Selected);
+		if (!sel || !sel->splat || !sel->visible) return;
 
 		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
 		const glm::vec3 pivot = GizmoPivot();
-		const float L = GizmoWorldScale(cam);
+		const float L = GizmoWorldScale(cam, pivot);
 
-		// Highlight currently hovered or dragged axis.
-		const int activeAxis = m_Drag.active ? m_Drag.axis : m_Hover.axis;
+		auto isHover = [&](GizmoHit::Kind k, int a) {
+			if (m_Drag.active) return m_Drag.kind == k && m_Drag.axis == a;
+			return m_Hover.kind == k && m_Hover.axis == a;
+		};
 
-		if (m_Tool == Tool::Translate) {
-			for (int a = 0; a < 3; ++a) {
-				const glm::vec4 c = (a == activeAxis) ? HoverCol(a) : kAxisCol[a];
-				m_Gizmo->AddArrow(pivot, AxisDir(a), L, c, 4.0f);
+		for (int a = 0; a < 3; ++a) {
+			const glm::vec4 baseCol = kAxisCol[a];
+			const glm::vec3 axisDir = AxisDir(a);
+
+			// Translate arrow (stem + V-tip).
+			{
+				const bool h = isHover(GizmoHit::Kind::TranslateAxis, a);
+				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
+				m_Gizmo->AddArrow(pivot, axisDir, L * kShaftFrac, c, 3.0f);
 			}
-		} else if (m_Tool == Tool::Rotate) {
-			for (int a = 0; a < 3; ++a) {
-				const glm::vec4 c = (a == activeAxis) ? HoverCol(a) : kAxisCol[a];
-				m_Gizmo->AddRing(pivot, AxisDir(a), L, c, 64, 3.0f);
+
+			// Rotate ring (48 segments).
+			{
+				const bool h = isHover(GizmoHit::Kind::RotateRing, a);
+				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
+				m_Gizmo->AddRing(pivot, axisDir, L * kRingFrac, c, 48, 2.0f);
 			}
-		} else { // Scale
-			for (int a = 0; a < 3; ++a) {
-				const glm::vec4 c = (a == activeAxis) ? HoverCol(a) : kAxisCol[a];
-				const glm::vec3 tip = pivot + AxisDir(a) * L;
-				m_Gizmo->AddLine(pivot, tip, c, 4.0f);
-				m_Gizmo->AddWireCube(tip, L * 0.12f, c, 2.5f);
+
+			// Scale stem + cube at L. Stem is short (kRingFrac → kCubeFrac).
+			{
+				const bool h = isHover(GizmoHit::Kind::ScaleAxis, a);
+				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
+				const glm::vec3 stemStart = pivot + axisDir * L * kRingFrac;
+				const glm::vec3 cubeCenter = pivot + axisDir * L * kCubeFrac;
+				m_Gizmo->AddLine(stemStart, cubeCenter, c, 3.0f);
+				m_Gizmo->AddWireCube(cubeCenter, L * kCubeSize, c, 2.0f);
 			}
-			// Uniform-scale handle: small cube at pivot.
-			const glm::vec4 cc = (activeAxis == 3) ? glm::vec4(1, 1, 1, 1)
-			                                       : glm::vec4(0.85f, 0.85f, 0.85f, 0.85f);
-			m_Gizmo->AddWireCube(pivot, L * 0.10f, cc, 2.5f);
+		}
+
+		// Center cube (uniform scale).
+		{
+			const bool h = isHover(GizmoHit::Kind::ScaleUniform, 3);
+			const glm::vec4 c = h ? HoverCol(kCenterCol) : kCenterCol;
+			m_Gizmo->AddWireCube(pivot, L * kCenterCubeSize, c, 2.0f);
+		}
+
+		// Rotation arc while dragging — visualizes the swept angle.
+		if (m_Drag.active && m_Drag.kind == GizmoHit::Kind::RotateRing) {
+			const int a = m_Drag.axis;
+			const glm::vec3 axis = AxisDir(a);
+			const glm::vec3 u =
+				(std::abs(axis.x) < 0.5f) ? glm::normalize(glm::cross(axis, glm::vec3(1, 0, 0)))
+				                          : glm::normalize(glm::cross(axis, glm::vec3(0, 1, 0)));
+			const glm::vec3 v = glm::normalize(glm::cross(axis, u));
+
+			float a0 = m_Drag.startAngleRad;
+			float a1 = m_Drag.currentAngleRad;
+			float span = a1 - a0;
+			int N = std::max(2, (int)std::ceil(std::abs(span) * 32.0f / glm::pi<float>()));
+			const glm::vec4 fillCol = glm::vec4(kAxisCol[a].r, kAxisCol[a].g, kAxisCol[a].b, 0.5f);
+			glm::vec3 prev = pivot + (std::cos(a0) * u + std::sin(a0) * v) * (L * kRingFrac);
+			for (int i = 1; i <= N; ++i) {
+				const float t = float(i) / float(N);
+				const float ang = a0 + span * t;
+				const glm::vec3 cur = pivot + (std::cos(ang) * u + std::sin(ang) * v) * (L * kRingFrac);
+				// Filled-look: 3 lines per segment (radial wedge edges).
+				m_Gizmo->AddLine(pivot, cur, fillCol, 1.5f);
+				m_Gizmo->AddLine(prev, cur, glm::vec4(fillCol.r, fillCol.g, fillCol.b, 0.95f), 3.0f);
+				prev = cur;
+			}
 		}
 	}
 
@@ -637,140 +770,170 @@ namespace Sandbox {
 		const glm::vec2 viewport = glm::vec2(m_ScreenWidth, m_ScreenHeight);
 
 		HandleHotkeys();
-		// Editor mode flips orbit→fly only via JS bridge toggle (no auto-
-		// flip on WASDEQ — those keys belong to the camera while RMB is
-		// held, but we don't want a stray W during click+drag to break
-		// the mode).
-		HandleStandardCameraArbitration(/*autoFlipOnFlyKey=*/false);
-		DrainUnusedOrbitInput();
+		// Editor only has the fly camera now — no orbit, no mode toggle.
 		HandleMouseInteraction(viewport);
 		m_Camera->Update(ts);
 
-		// Apply transform to splat renderer (cheap, sets matrix uniform).
-		if (m_Splats) m_Splats->SetModelMatrix(m_Transform.Matrix());
-
 		const SPtr<Camera> activeCam = m_Camera->GetRenderCamera();
 
+		// Per-object frame-interval samples + perf tick for the FIRST splat
+		// only (perf overlay is a single set of metrics; later we'll need to
+		// scope this to selected, but for now the first object wins).
+		static double s_PrevFrameStart = 0.0;
 		const double frameStart = glfwGetTime();
-		if (m_Splats && m_PrevFrameStart > 0.0) {
-			m_Splats->Metrics().frameMs.Push(
-				static_cast<float>((frameStart - m_PrevFrameStart) * 1000.0));
+		Engine::GaussianSplatRenderer* perfSplat = nullptr;
+		for (auto& o : m_Objects) { if (o.splat && o.visible) { perfSplat = o.splat.get(); break; } }
+		if (perfSplat && s_PrevFrameStart > 0.0) {
+			perfSplat->Metrics().frameMs.Push(
+				static_cast<float>((frameStart - s_PrevFrameStart) * 1000.0));
 		}
-		m_PrevFrameStart = frameStart;
-		if (m_Splats) m_Splats->TickPerf();
+		s_PrevFrameStart = frameStart;
+		if (perfSplat) perfSplat->TickPerf();
 
 		if (!Renderer::BeginScene(activeCam)) return;
 
+		// Sort + draw EVERY visible object. Each owns its own renderer.
 		const glm::mat4 view = activeCam->GetViewMatrix();
 		const glm::mat4 proj = activeCam->GetProjectionMatrix();
-		if (m_Splats) m_Splats->EncodeSort(Renderer::Encoder(), view, proj);
+		for (auto& o : m_Objects) {
+			if (!o.splat || !o.visible) continue;
+			o.splat->SetModelMatrix(o.transform.Matrix());
+			o.splat->EncodeSort(Renderer::Encoder(), view, proj);
+		}
 
 		const WGPUPassTimestampWrites* renderTw =
-			m_Splats ? m_Splats->GetRenderPassTimestampWrites() : nullptr;
+			perfSplat ? perfSplat->GetRenderPassTimestampWrites() : nullptr;
 		Renderer::OpenColorPass(0.12f, 0.13f, 0.16f, 1.0f, renderTw);
 
 		if (m_Grid) m_Grid->EncodeRender(Renderer::CurrentPass(), activeCam);
-		if (m_Splats) {
-			m_Splats->EncodeRender(Renderer::CurrentPass(),
-			                       activeCam,
-			                       viewport);
+		for (auto& o : m_Objects) {
+			if (!o.splat || !o.visible) continue;
+			o.splat->EncodeRender(Renderer::CurrentPass(), activeCam, viewport);
 		}
 
-		BuildGizmoPrimitives(viewport);
+		BuildSceneGizmos(viewport);
 		if (m_Gizmo) m_Gizmo->EncodeRender(Renderer::CurrentPass(), activeCam, viewport);
 
 		Renderer::ClosePass();
+		if (perfSplat) perfSplat->ResolveAndReadTimestamps(Renderer::Encoder());
 
-		if (m_Splats) m_Splats->ResolveAndReadTimestamps(Renderer::Encoder());
-
-		if (m_Splats) {
-			auto& m = m_Splats->Metrics();
-			m.splatCount = static_cast<int>(m_SplatCount);
+		if (perfSplat) {
+			auto& m = perfSplat->Metrics();
+			m.splatCount = static_cast<int>(perfSplat->SplatCount());
 			const glm::vec3 eye = m_Camera->GetPosition();
 			m.camEye[0] = eye.x; m.camEye[1] = eye.y; m.camEye[2] = eye.z;
 			m.Emit();
-		}
-
-		++m_FpsCounter;
-		double now = glfwGetTime();
-		if (m_FpsT0 == 0.0) m_FpsT0 = now;
-		if (m_FpsCounter % 120 == 0) {
-			float dt = (float)(now - m_FpsT0);
-			INFO_CORE("editor: 120 frames in {0:.3f}s = {1:.1f} fps", dt, 120.0f / dt);
-			m_FpsT0 = now;
 		}
 
 		Renderer::EndScene();
 	}
 
 
-	void EditorScene::LoadSplatFromBytes(const uint8_t* data, size_t size)
+	// --- Public API ------------------------------------------------------------
+
+	EditorScene::ObjectId EditorScene::LoadSplatFromBytes(const uint8_t* data, size_t size,
+	                                                      const std::string& sourceName)
 	{
-		INFO_CORE("EditorScene: parsing {0} byte splat payload", (uint64_t)size);
+		INFO_CORE("EditorScene: parsing {0} byte splat payload (name='{1}')",
+		          (uint64_t)size, sourceName);
 		SplatData parsed = SplatLoader::LoadSplatFromBytes(data, size, "editor-upload");
 		if (parsed.Empty()) {
 			ERROR_CORE("EditorScene: splat parse returned no points");
 			PostSceneMessage("{\"type\":\"editor-error\",\"message\":\"Failed to parse splat\"}");
-			return;
+			return 0;
 		}
 
-		if (!m_Splats) {
-			m_Splats = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
+		EditorObject o;
+		o.id    = m_NextId++;
+		o.name  = AutoNameFor(StripFilename(sourceName));
+		o.splat = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
+		o.splat->Upload(parsed);
+		// Drop the centroid at world origin so the FIRST object lands on the
+		// grid where the camera is looking. Multi-load: subsequent objects
+		// inherit the same offset, so the user sees them stacked at origin
+		// until they move them.
+		o.transform.position = -o.splat->Centroid();
+		o.splat->SetModelMatrix(o.transform.Matrix());
+		o.visible = true;
+
+		const ObjectId id = o.id;
+		m_Objects.push_back(std::move(o));
+		m_Selected = id;
+
+		INFO_CORE("EditorScene: loaded object id={0} ('{1}'), total objects={2}",
+		          (uint64_t)id, FindObject(id)->name, (uint64_t)m_Objects.size());
+
+		PostObjectsList();
+		PostSelectionChanged();
+		PostTransformUpdate(true);
+		return id;
+	}
+
+
+	void EditorScene::DeleteObject(ObjectId id)
+	{
+		if (!id) return;
+		auto it = std::find_if(m_Objects.begin(), m_Objects.end(),
+		                       [&](const EditorObject& o){ return o.id == id; });
+		if (it == m_Objects.end()) return;
+		const bool wasSelected = (m_Selected == id);
+		m_Objects.erase(it);
+		if (wasSelected) {
+			m_Selected = m_Objects.empty() ? 0 : m_Objects.front().id;
 		}
-		m_Splats->Upload(parsed);
-		m_SplatCount = parsed.Count();
-		m_HasContent = true;
-
-		// Reset transform — drop the splat's centroid at the WORLD origin so
-		// the gizmo lands somewhere visible (the splat file's coordinate
-		// frame often centers at the centroid already; if not, the user
-		// can drag the gizmo wherever).
-		m_Transform = Transform{};
-		m_Transform.position = -m_Splats->Centroid();
-		m_Splats->SetModelMatrix(m_Transform.Matrix());
-
-		// Camera reframe at the centroid (now at world origin after the
-		// transform). Keep whatever mode the user was in — Tab is how
-		// they switch, not asset loading.
-		const glm::vec3 pivot  = glm::vec3(0.0f);
-		const float     radius = 3.0f;
-		const glm::vec3 eye    = pivot + glm::vec3(0.0f, 0.4f, 1.0f) * radius;
-		if (m_Camera->Mode() == Engine::CameraMode::Orbit) {
-			SwitchCameraToOrbit(pivot, eye);
-		} else {
-			SwitchCameraToFly(eye, glm::normalize(pivot - eye));
-		}
-
-		m_Selected = true;
-
-		INFO_CORE("EditorScene: loaded {0} splats; world-aligned at origin", (uint64_t)m_SplatCount);
-		char buf[160];
-		std::snprintf(buf, sizeof(buf),
-		              "{\"type\":\"editor-splat-loaded\",\"count\":%llu}",
-		              (unsigned long long)m_SplatCount);
-		PostSceneMessage(buf);
+		PostObjectsList();
 		PostSelectionChanged();
 		PostTransformUpdate(true);
 	}
 
 
-	void EditorScene::ClearScene()
+	void EditorScene::SelectObject(ObjectId id)
 	{
-		m_Splats.reset();
-		m_SplatCount = 0;
-		m_HasContent = false;
-		m_Selected   = false;
-		m_Transform  = Transform{};
-		PostSceneMessage("{\"type\":\"editor-scene-cleared\"}");
+		// Allow id=0 to deselect.
+		if (id != 0 && !FindObject(id)) return;
+		if (m_Selected == id) return;
+		m_Selected = id;
 		PostSelectionChanged();
+		PostTransformUpdate(true);
 	}
 
 
-	void EditorScene::SetTool(int tool)
+	void EditorScene::FocusObject(ObjectId id)
 	{
-		if (tool < 0 || tool > 2) return;
-		m_Tool = static_cast<Tool>(tool);
-		PostToolChanged();
+		const auto* o = FindObject(id);
+		if (!o || !o->splat) return;
+		glm::vec3 mn, mx;
+		ComputeWorldAabb(*o, mn, mx);
+		const glm::vec3 center = (mn + mx) * 0.5f;
+		const float diag = std::max(0.5f, glm::length(mx - mn));
+		// Position the camera back along its current forward by ~1.6 diagonals.
+		const glm::vec3 fwd = m_Camera->GetForward();
+		const glm::vec3 eye = center - fwd * (diag * 1.6f);
+		SwitchCameraToFly(eye, glm::normalize(center - eye));
+		// Re-select if needed so the gizmo shows.
+		if (m_Selected != id) {
+			m_Selected = id;
+			PostSelectionChanged();
+		}
+	}
+
+
+	void EditorScene::RenameObject(ObjectId id, const std::string& name)
+	{
+		auto* o = FindObject(id);
+		if (!o) return;
+		if (name.empty()) return;
+		o->name = name;
+		PostObjectsList();
+	}
+
+
+	void EditorScene::SetVisibility(ObjectId id, bool visible)
+	{
+		auto* o = FindObject(id);
+		if (!o) return;
+		o->visible = visible;
+		PostObjectsList();
 	}
 
 
@@ -784,57 +947,80 @@ namespace Sandbox {
 	}
 
 
-	void EditorScene::PostToolChanged()
+	void EditorScene::ClearAll()
 	{
-		const char* name = (m_Tool == Tool::Translate) ? "translate"
-		                 : (m_Tool == Tool::Rotate)    ? "rotate" : "scale";
-		char buf[80];
-		std::snprintf(buf, sizeof(buf),
-		              "{\"type\":\"editor-tool-changed\",\"tool\":\"%s\"}", name);
-		PostSceneMessage(buf);
+		m_Objects.clear();
+		m_Selected = 0;
+		PostObjectsList();
+		PostSelectionChanged();
+	}
+
+
+	// --- Posting ---------------------------------------------------------------
+
+	void EditorScene::PostObjectsList()
+	{
+		// Compact JSON — keep within a reasonable stack buffer.
+		std::string body = "{\"type\":\"editor-objects\",\"objects\":[";
+		bool first = true;
+		for (const auto& o : m_Objects) {
+			char row[256];
+			std::snprintf(row, sizeof(row),
+			              "%s{\"id\":%llu,\"name\":\"%s\",\"visible\":%s,\"count\":%llu}",
+			              first ? "" : ",",
+			              (unsigned long long)o.id,
+			              o.name.c_str(),
+			              o.visible ? "true" : "false",
+			              (unsigned long long)(o.splat ? o.splat->SplatCount() : 0));
+			body += row;
+			first = false;
+		}
+		body += "]}";
+		PostSceneMessage(body.c_str());
 	}
 
 
 	void EditorScene::PostSelectionChanged()
 	{
-		char buf[160];
+		char buf[128];
 		std::snprintf(buf, sizeof(buf),
-		              "{\"type\":\"editor-selection-changed\",\"selected\":%s,\"hasContent\":%s,\"count\":%llu}",
-		              m_Selected ? "true" : "false",
-		              m_HasContent ? "true" : "false",
-		              (unsigned long long)m_SplatCount);
+		              "{\"type\":\"editor-selection-changed\",\"id\":%llu}",
+		              (unsigned long long)m_Selected);
 		PostSceneMessage(buf);
 	}
 
 
 	void EditorScene::PostTransformUpdate(bool isFinal)
 	{
-		// Euler degrees for display (XYZ Tait-Bryan). The gizmo always
-		// operates on the quaternion internally; euler is for the
-		// inspector readout only.
-		const glm::vec3 eulerRad = glm::eulerAngles(m_Transform.rotation);
-		const glm::vec3 eulerDeg = glm::degrees(eulerRad);
+		const auto* o = SelectedObject();
+		const glm::vec3 pos = o ? o->transform.position : glm::vec3(0.0f);
+		const glm::vec3 scl = o ? o->transform.scale    : glm::vec3(1.0f);
+		const glm::vec3 eulerDeg = glm::degrees(
+			o ? glm::eulerAngles(o->transform.rotation) : glm::vec3(0.0f));
 
-		const char* tool = (m_Tool == Tool::Translate) ? "translate"
-		                 : (m_Tool == Tool::Rotate)    ? "rotate" : "scale";
-		const int  axis  = m_Drag.active ? m_Drag.axis : -1;
+		const char* kindStr =
+			m_Drag.kind == GizmoHit::Kind::TranslateAxis ? "translate"
+			: m_Drag.kind == GizmoHit::Kind::RotateRing   ? "rotate"
+			: m_Drag.kind == GizmoHit::Kind::ScaleAxis    ? "scale"
+			: m_Drag.kind == GizmoHit::Kind::ScaleUniform ? "scale"
+			: "none";
+		const int axis = m_Drag.active ? m_Drag.axis : -1;
 
 		char buf[512];
 		std::snprintf(buf, sizeof(buf),
 		              "{\"type\":\"editor-transform\","
-		              "\"final\":%s,"
-		              "\"drag\":%s,"
-		              "\"tool\":\"%s\","
-		              "\"axis\":%d,"
+		              "\"final\":%s,\"drag\":%s,\"kind\":\"%s\",\"axis\":%d,"
+		              "\"id\":%llu,"
 		              "\"position\":[%.4f,%.4f,%.4f],"
 		              "\"rotationDeg\":[%.3f,%.3f,%.3f],"
 		              "\"scale\":[%.4f,%.4f,%.4f]}",
 		              isFinal ? "true" : "false",
 		              m_Drag.active ? "true" : "false",
-		              tool, axis,
-		              m_Transform.position.x, m_Transform.position.y, m_Transform.position.z,
+		              kindStr, axis,
+		              (unsigned long long)m_Selected,
+		              pos.x, pos.y, pos.z,
 		              eulerDeg.x, eulerDeg.y, eulerDeg.z,
-		              m_Transform.scale.x, m_Transform.scale.y, m_Transform.scale.z);
+		              scl.x, scl.y, scl.z);
 		PostSceneMessage(buf);
 	}
 
@@ -857,28 +1043,54 @@ extern "C" {
 #define EDITOR_EXPORT
 #endif
 
-EDITOR_EXPORT void editor_load_splat_bytes(uint8_t* data, int len)
+EDITOR_EXPORT void editor_load_splat_bytes(uint8_t* data, int len, const char* name)
 {
 	auto* s = ::Sandbox::EditorScene::Current();
-	if (!s) { ERROR_CORE("editor_load_splat_bytes: no live EditorScene"); return; }
-	if (!data || len <= 0) {
-		ERROR_CORE("editor_load_splat_bytes: bad args"); return;
-	}
-	s->LoadSplatFromBytes(data, static_cast<size_t>(len));
+	if (!s) return;
+	if (!data || len <= 0) return;
+	s->LoadSplatFromBytes(data, static_cast<size_t>(len), name ? name : "");
 }
 
 EDITOR_EXPORT void editor_clear_scene(void)
 {
 	auto* s = ::Sandbox::EditorScene::Current();
 	if (!s) return;
-	s->ClearScene();
+	s->ClearAll();
 }
 
-EDITOR_EXPORT void editor_set_tool(int tool)
+EDITOR_EXPORT void editor_select_object(double id)
 {
 	auto* s = ::Sandbox::EditorScene::Current();
 	if (!s) return;
-	s->SetTool(tool);
+	s->SelectObject(static_cast<::Sandbox::EditorScene::ObjectId>(id));
+}
+
+EDITOR_EXPORT void editor_delete_object(double id)
+{
+	auto* s = ::Sandbox::EditorScene::Current();
+	if (!s) return;
+	s->DeleteObject(static_cast<::Sandbox::EditorScene::ObjectId>(id));
+}
+
+EDITOR_EXPORT void editor_focus_object(double id)
+{
+	auto* s = ::Sandbox::EditorScene::Current();
+	if (!s) return;
+	s->FocusObject(static_cast<::Sandbox::EditorScene::ObjectId>(id));
+}
+
+EDITOR_EXPORT void editor_rename_object(double id, const char* name)
+{
+	auto* s = ::Sandbox::EditorScene::Current();
+	if (!s || !name) return;
+	s->RenameObject(static_cast<::Sandbox::EditorScene::ObjectId>(id), name);
+}
+
+EDITOR_EXPORT void editor_set_visibility(double id, int visible)
+{
+	auto* s = ::Sandbox::EditorScene::Current();
+	if (!s) return;
+	s->SetVisibility(static_cast<::Sandbox::EditorScene::ObjectId>(id), visible != 0);
 }
 
 EDITOR_EXPORT void editor_set_snap(int onOff)

@@ -82,6 +82,41 @@ body { margin: 0; overflow: hidden; background: transparent; }
 # the `renderer-ready` literal also doubles as an idempotency sentinel below.
 SCRIPT_PATCH = """<script>
 (function () {
+  // ---- Dev log sink ----------------------------------------------------
+  // Fire-and-forget POSTs to /__dev_log so the agent can `tail` a single
+  // file and see what the renderer actually did. Wrapped in try/catch
+  // because we never want logging to break the renderer; absent endpoint
+  // (prod build) silently fails.
+  function devLog(tag, msg) {
+    try {
+      fetch('/__dev_log', {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain' },
+        body: '[' + tag + '] ' + msg,
+        keepalive: true
+      }).catch(function(){});
+    } catch (e) {}
+  }
+  window.__devLog = devLog;
+  devLog('shim', 'init');
+
+  // Hook Module.print / printErr (which carry every INFO_CORE/WARN_CORE/
+  // ERROR_CORE through spdlog → emscripten stdout) so all C++ logs end
+  // up in the dev log alongside JS-side events.
+  function hookModuleLogs() {
+    if (typeof Module === 'undefined') {
+      requestAnimationFrame(hookModuleLogs);
+      return;
+    }
+    if (Module.__devLogHooked) return;
+    Module.__devLogHooked = true;
+    var origPrint    = Module.print    || function(){};
+    var origPrintErr = Module.printErr || function(){};
+    Module.print    = function(msg) { origPrint(msg);    devLog('engine', String(msg)); };
+    Module.printErr = function(msg) { origPrintErr(msg); devLog('engine.err', String(msg)); };
+  }
+  hookModuleLogs();
+
   // Re-route .data requests so both dev (vite middleware) and prod (nginx
   // /renderer/data/ alias) can serve the (huge) bundle however they like.
   function hookLocateFile() {
@@ -259,6 +294,18 @@ SCRIPT_PATCH = """<script>
   //   {type:'editor-clear-scene'}
   //     — drops loaded content.
   window.addEventListener('message', function (e) {
+    // Catch-all logging — fire BEFORE any filtering so we see absolutely
+    // every postMessage that lands on the iframe window, including
+    // accidental third-party messages or malformed payloads.
+    try {
+      var raw = e && e.data;
+      var t = raw && typeof raw === 'object' ? raw.type : null;
+      devLog('shim.recv',
+        'type=' + String(t) +
+        (raw && raw.id !== undefined ? ' id=' + raw.id : '') +
+        (raw && raw.bytes ? ' bytes=' + (raw.bytes.byteLength || 0) : '') +
+        ' origin=' + (e && e.origin));
+    } catch (_) {}
     var data = e && e.data;
     if (!data) return;
 
@@ -272,8 +319,6 @@ SCRIPT_PATCH = """<script>
 
     if (data.type === 'editor-load-splat') {
       if (!isReady()) {
-        // Defer one tick — covers the small window between renderer-ready
-        // and the first OnUpdate when the scene singleton becomes live.
         setTimeout(function () {
           window.dispatchEvent(new MessageEvent('message', { data: data }));
         }, 50);
@@ -296,9 +341,14 @@ SCRIPT_PATCH = """<script>
         }, '*');
         return;
       }
+      // Name string also marshalled — Module.ccall handles char* via the
+      // 'string' arg type.
+      var name = (typeof data.name === 'string') ? data.name : '';
       try {
         Module.HEAPU8.set(view, ptr);
-        Module.ccall('editor_load_splat_bytes', null, ['number', 'number'], [ptr, view.length]);
+        Module.ccall('editor_load_splat_bytes', null,
+                     ['number', 'number', 'string'],
+                     [ptr, view.length, name]);
       } finally {
         Module._free(ptr);
       }
@@ -311,14 +361,35 @@ SCRIPT_PATCH = """<script>
       return;
     }
 
-    if (data.type === 'editor-set-tool') {
-      // 0=translate, 1=rotate, 2=scale
-      var tool = (data.tool === 'translate') ? 0
-               : (data.tool === 'rotate')    ? 1
-               : (data.tool === 'scale')     ? 2 : -1;
-      if (tool < 0) return;
+    if (data.type === 'editor-select-object') {
       if (!isReady()) return;
-      Module.ccall('editor_set_tool', null, ['number'], [tool]);
+      Module.ccall('editor_select_object', null, ['number'], [data.id || 0]);
+      return;
+    }
+
+    if (data.type === 'editor-delete-object') {
+      if (!isReady()) return;
+      Module.ccall('editor_delete_object', null, ['number'], [data.id || 0]);
+      return;
+    }
+
+    if (data.type === 'editor-focus-object') {
+      if (!isReady()) return;
+      Module.ccall('editor_focus_object', null, ['number'], [data.id || 0]);
+      return;
+    }
+
+    if (data.type === 'editor-rename-object') {
+      if (!isReady()) return;
+      Module.ccall('editor_rename_object', null, ['number', 'string'],
+                   [data.id || 0, String(data.name || '')]);
+      return;
+    }
+
+    if (data.type === 'editor-set-visibility') {
+      if (!isReady()) return;
+      Module.ccall('editor_set_visibility', null, ['number', 'number'],
+                   [data.id || 0, data.visible ? 1 : 0]);
       return;
     }
 
