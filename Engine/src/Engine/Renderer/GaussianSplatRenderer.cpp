@@ -85,7 +85,7 @@ namespace Engine {
 	#ifdef __EMSCRIPTEN__
 		m_SortOnStopOnly = (EM_ASM_INT({
 			try {
-				var p = new URLSearchParams(window.location.search || '');
+				var p = new URLSearchParams(window.location.search);
 				var f = p.get('sort_on_stop');
 				if (f === 'force') return 1;
 				if (f === 'never') return 0;

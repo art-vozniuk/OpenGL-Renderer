@@ -66,10 +66,62 @@ namespace Sandbox {
 			return c;
 		}
 
-		glm::vec2 GetCursor()
+		// Cursor + viewport in CSS pixels relative to the canvas.
+		//
+		// We avoid trusting `glfwGetCursorPos` and `m_ScreenWidth/Height`
+		// for hit-testing because their units (drawing-buffer vs CSS)
+		// vary across emscripten GLFW ports, browsers, and DPRs. Instead
+		// we go straight to the DOM: cursor is computed from the last
+		// mousemove relative to canvas.getBoundingClientRect(), and the
+		// viewport size is rect.width/rect.height. Hit tests then work
+		// in plain "pixels the user sees on screen" which always agree
+		// regardless of how the canvas is scaled.
+		struct CursorReading {
+			glm::vec2 cursor   = glm::vec2(0.0f);  // CSS px relative to canvas
+			glm::vec2 viewport = glm::vec2(1.0f);  // canvas CSS size in px
+			bool      valid    = false;
+		};
+
+		CursorReading ReadCursorCss()
 		{
-			const auto p = Input::GetMousePosition();
-			return glm::vec2(p.first, p.second);
+			CursorReading r;
+		#ifdef __EMSCRIPTEN__
+			// EM_ASM splits its body on top-level commas (C preprocessor
+			// arg-parsing), so we wrap multi-statement JS in extra parens
+			// and keep commas inside nested parens (function-call args,
+			// already protected). The state object is assigned member-
+			// by-member to avoid `{x: 0, y: 0}` literals at top level.
+			double cx = 0.0, cy = 0.0, vw = 0.0, vh = 0.0, ok = 0.0;
+			EM_ASM({
+				try {
+					var cv = Module['canvas'] || document.querySelector('canvas.emscripten') || document.querySelector('canvas');
+					if (!cv) return;
+					var rect = cv.getBoundingClientRect();
+					if (!window.__editorLastMouse) {
+						var m0 = {};
+						m0.x = 0;
+						m0.y = 0;
+						window.__editorLastMouse = m0;
+						window.addEventListener('mousemove', function(ev) {
+							window.__editorLastMouse.x = ev.clientX;
+							window.__editorLastMouse.y = ev.clientY;
+						});
+					}
+					var m = window.__editorLastMouse;
+					setValue($0, m.x - rect.left, 'double');
+					setValue($1, m.y - rect.top,  'double');
+					setValue($2, rect.width,      'double');
+					setValue($3, rect.height,     'double');
+					setValue($4, 1.0,             'double');
+				} catch (e) {}
+			}, &cx, &cy, &vw, &vh, &ok);
+			if (ok > 0.5 && vw > 0.0 && vh > 0.0) {
+				r.cursor   = glm::vec2((float)cx, (float)cy);
+				r.viewport = glm::vec2((float)vw, (float)vh);
+				r.valid    = true;
+			}
+		#endif
+			return r;
 		}
 
 		bool LmbDown()      { return Input::IsMouseButtonPressed(MOUSE_BUTTON_LEFT); }
@@ -368,20 +420,36 @@ namespace Sandbox {
 		}
 		m_PrevW = w; m_PrevE = e; m_PrevR = r;
 
-		// Tab → snap camera back to orbit (custom: arbitration helper auto-
-		// flips on WASDEQ, but for the editor we want Tab specifically).
+		// Tab → toggle fly ↔ orbit. The arbitration helper handles JS-bridge
+		// requests; Tab is the editor-only keyboard alternative.
 		const bool tab = Input::IsKeyPressed(KEY_TAB);
-		if (tab && !m_PrevTab && m_Camera->Mode() == Engine::CameraMode::Fly) {
+		if (tab && !m_PrevTab) {
 			const Engine::PoseSnapshot s = m_Camera->Snapshot();
-			SwitchCameraToOrbit(s.orbitTarget, s.position);
+			if (m_Camera->Mode() == Engine::CameraMode::Fly) {
+				SwitchCameraToOrbit(s.orbitTarget, s.position);
+			} else {
+				SwitchCameraToFly(s.position, s.forward);
+			}
 		}
 		m_PrevTab = tab;
 	}
 
 
-	void EditorScene::HandleMouseInteraction(const glm::vec2& viewport)
+	void EditorScene::HandleMouseInteraction(const glm::vec2& fbViewport)
 	{
-		const glm::vec2 cursor = GetCursor();
+		// Hit tests happen in CSS pixels (what the user sees), not in
+		// the drawing-buffer pixels we use for rendering. ReadCursorCss
+		// returns both cursor and viewport in that CSS frame, so cursor
+		// (0..rect.width) and ProjectToScreen output (also computed against
+		// rect.width) line up regardless of DPR or canvas CSS scaling.
+		// Native build falls back to GLFW + the drawing-buffer viewport.
+		const auto reading = ReadCursorCss();
+		glm::vec2 cursor   = reading.valid ? reading.cursor   : glm::vec2(0.0f);
+		glm::vec2 viewport = reading.valid ? reading.viewport : fbViewport;
+		if (!reading.valid) {
+			const auto p = Input::GetMousePosition();
+			cursor = glm::vec2(p.first, p.second);
+		}
 		const bool lmb = LmbDown();
 
 		// Hover update (every frame while not dragging).
@@ -661,12 +729,17 @@ namespace Sandbox {
 		m_Transform.position = -m_Splats->Centroid();
 		m_Splats->SetModelMatrix(m_Transform.Matrix());
 
-		// Camera reframe — orbit around the centroid (which is now at
-		// world origin after the transform).
-		const glm::vec3 pivot = glm::vec3(0.0f);
-		const float radius = 3.0f;
-		const glm::vec3 eye = pivot + glm::vec3(0.0f, 0.4f, 1.0f) * radius;
-		SwitchCameraToOrbit(pivot, eye);
+		// Camera reframe at the centroid (now at world origin after the
+		// transform). Keep whatever mode the user was in — Tab is how
+		// they switch, not asset loading.
+		const glm::vec3 pivot  = glm::vec3(0.0f);
+		const float     radius = 3.0f;
+		const glm::vec3 eye    = pivot + glm::vec3(0.0f, 0.4f, 1.0f) * radius;
+		if (m_Camera->Mode() == Engine::CameraMode::Orbit) {
+			SwitchCameraToOrbit(pivot, eye);
+		} else {
+			SwitchCameraToFly(eye, glm::normalize(pivot - eye));
+		}
 
 		m_Selected = true;
 
