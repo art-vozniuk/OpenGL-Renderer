@@ -103,4 +103,24 @@ namespace Engine {
 		m_Camera->RecalculateViewMatrix(m_Transform);
 	}
 
+
+	PoseSnapshot FlyCamera::Snapshot() const
+	{
+		PoseSnapshot s;
+		s.position    = m_Position;
+		s.forward     = GetForward();
+		// We don't track an orbit target/radius. Provide a sensible
+		// default in case the next controller is an orbit camera:
+		// pivot a fixed distance in front of the eye along forward.
+		s.orbitRadius = 3.0f;
+		s.orbitTarget = m_Position + s.forward * s.orbitRadius;
+		return s;
+	}
+
+
+	void FlyCamera::ApplySnapshot(const PoseSnapshot& s)
+	{
+		SetPose(s.position, s.forward);
+	}
+
 }

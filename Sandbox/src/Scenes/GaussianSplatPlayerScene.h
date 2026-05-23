@@ -1,8 +1,6 @@
 #pragma once
 
 #include "SceneBase.h"
-#include "Engine/FlyCamera.h"
-#include "Engine/OrbitCamera.h"
 #include "Engine/Renderer/GaussianSplatRenderer.h"
 #include "Engine/Renderer/SplatLoader.h"
 
@@ -75,18 +73,10 @@ namespace Sandbox {
 		void StartDecoder();
 		void StopDecoder();
 
-		// Camera mode arbitration — orbit by default, switch to fly on
-		// first WASDEQ press (same UX as the static gsplat scene), back
-		// to orbit on Tab. Fly mode preserves the orbit pose; orbit re-
-		// pivots in front of the fly camera at the previous orbit radius.
-		enum class CameraMode { Orbit = 0, Fly = 1 };
-		void SetMode(CameraMode mode);
-		bool AnyFlyKeyPressed() const;
-
-		Engine::OrbitCamera m_OrbitCam;
-		Engine::FlyCamera   m_FlyCam;
-		CameraMode          m_Mode = CameraMode::Orbit;
-		bool                m_PrevTabDown = false;  // edge-trigger Tab → orbit
+		// Camera lives in SceneBase. WASDEQ auto-promotes orbit → fly via
+		// HandleStandardCameraArbitration; Tab snaps back to orbit
+		// (edge-detected below).
+		bool                m_PrevTabDown = false;
 
 		std::unique_ptr<Engine::GaussianSplatRenderer> m_Splats;
 

@@ -66,20 +66,6 @@ namespace Sandbox {
 			return c;
 		}
 
-	#ifdef __EMSCRIPTEN__
-		void PostEditorMessage(const char* json) {
-			EM_ASM({
-				try {
-					if (typeof window !== 'undefined' && window.parent !== window) {
-						window.parent.postMessage(JSON.parse(UTF8ToString($0)), '*');
-					}
-				} catch (e) {}
-			}, json);
-		}
-	#else
-		void PostEditorMessage(const char*) {}
-	#endif
-
 		glm::vec2 GetCursor()
 		{
 			const auto p = Input::GetMousePosition();
@@ -273,8 +259,7 @@ namespace Sandbox {
 		GizmoHit best{};
 		if (!m_Selected || !m_HasContent) return best;
 
-		const SPtr<Camera> cam = (m_Mode == CameraMode::Orbit)
-			? m_OrbitCam.GetRenderCamera() : m_FlyCam.GetRenderCamera();
+		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
 		const glm::vec3 pivot = GizmoPivot();
 		const float worldScale = GizmoWorldScale(cam);
 
@@ -340,15 +325,12 @@ namespace Sandbox {
 	{
 		s_Current = this;
 
-		const float aspect = m_ScreenWidth / m_ScreenHeight;
-		m_FlyCam.SetPerspective(glm::radians(45.0f), aspect, 0.1f, 10000.0f);
-		m_OrbitCam.SetPerspective(glm::radians(45.0f), aspect, 0.1f, 10000.0f);
-		// Editor convention: RMB drives camera, LMB is free for selection.
-		m_FlyCam  .SetDragButton(MOUSE_BUTTON_RIGHT);
-		m_OrbitCam.SetDragButton(MOUSE_BUTTON_RIGHT);
+		// Editor convention: RMB drives the camera so LMB stays free for
+		// selection / gizmo. SceneBase reads this when spawning cameras.
+		m_CameraConfig.dragButton = MOUSE_BUTTON_RIGHT;
 
-		m_FlyCam.SetPose(kSpawnPos, kSpawnForward);
-		m_OrbitCam.SetOrbit(glm::vec3(0.0f), kSpawnPos);
+		// Fly by default — orbit needs a subject and the scene starts empty.
+		SwitchCameraToFly(kSpawnPos, kSpawnForward);
 
 		m_Grid  = std::make_unique<GridRenderer>(Application::Get().GetGfx());
 		m_Gizmo = std::make_unique<GizmoRenderer>(Application::Get().GetGfx());
@@ -356,8 +338,8 @@ namespace Sandbox {
 		INFO_CORE("EditorScene: ready (empty, fly-cam @ ({0:.2f},{1:.2f},{2:.2f}); RMB=camera)",
 		          kSpawnPos.x, kSpawnPos.y, kSpawnPos.z);
 
-		PostEditorMessage("{\"type\":\"splat-ready\"}");
-		PostEditorMessage("{\"type\":\"editor-ready\"}");
+		PostSceneMessage("{\"type\":\"splat-ready\"}");
+		PostSceneMessage("{\"type\":\"editor-ready\"}");
 	}
 
 
@@ -386,38 +368,14 @@ namespace Sandbox {
 		}
 		m_PrevW = w; m_PrevE = e; m_PrevR = r;
 
-		// Tab → snap camera back to orbit (same as other scenes).
+		// Tab → snap camera back to orbit (custom: arbitration helper auto-
+		// flips on WASDEQ, but for the editor we want Tab specifically).
 		const bool tab = Input::IsKeyPressed(KEY_TAB);
-		if (tab && !m_PrevTab && m_Mode == CameraMode::Fly) {
-			m_Mode = CameraMode::Orbit;
-			const glm::vec3 eye = m_FlyCam.GetPosition();
-			const glm::vec3 fwd = m_FlyCam.GetForward();
-			m_OrbitCam.SetOrbit(eye + fwd * 3.0f, eye);
-			PostEditorMessage("{\"type\":\"camera-mode-changed\",\"mode\":\"orbit\"}");
+		if (tab && !m_PrevTab && m_Camera->Mode() == Engine::CameraMode::Fly) {
+			const Engine::PoseSnapshot s = m_Camera->Snapshot();
+			SwitchCameraToOrbit(s.orbitTarget, s.position);
 		}
 		m_PrevTab = tab;
-	}
-
-
-	void EditorScene::HandleCameraModeArbitration()
-	{
-		const int requested = ConsumeRequestedMode();
-		if (requested == 0) {
-			if (m_Mode != CameraMode::Orbit) {
-				const glm::vec3 eye = m_FlyCam.GetPosition();
-				const glm::vec3 fwd = m_FlyCam.GetForward();
-				m_OrbitCam.SetOrbit(eye + fwd * 3.0f, eye);
-				m_Mode = CameraMode::Orbit;
-				PostEditorMessage("{\"type\":\"camera-mode-changed\",\"mode\":\"orbit\"}");
-			}
-		} else if (requested == 1) {
-			if (m_Mode != CameraMode::Fly) {
-				const glm::vec3 eye = m_OrbitCam.GetPosition();
-				m_FlyCam.SetPose(eye, m_OrbitCam.GetTarget() - eye);
-				m_Mode = CameraMode::Fly;
-				PostEditorMessage("{\"type\":\"camera-mode-changed\",\"mode\":\"fly\"}");
-			}
-		}
 	}
 
 
@@ -451,10 +409,8 @@ namespace Sandbox {
 				EndDrag();
 			} else if (glm::length(cursor - m_LmbPressCursor) < kClickSlopPx) {
 				// Plain click — selection toggle.
-				const SPtr<Camera> cam = (m_Mode == CameraMode::Orbit)
-					? m_OrbitCam.GetRenderCamera() : m_FlyCam.GetRenderCamera();
 				glm::vec3 o, d;
-				CursorRay(cam, cursor, viewport, o, d);
+				CursorRay(m_Camera->GetRenderCamera(), cursor, viewport, o, d);
 				const bool hit = RaycastSplat(o, d);
 				const bool wasSelected = m_Selected;
 				m_Selected = hit;
@@ -474,8 +430,7 @@ namespace Sandbox {
 		m_Drag.startCursor    = cursor;
 		m_Drag.startTransform = m_Transform;
 
-		const SPtr<Camera> cam = (m_Mode == CameraMode::Orbit)
-			? m_OrbitCam.GetRenderCamera() : m_FlyCam.GetRenderCamera();
+		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
 
 		if (m_Tool == Tool::Translate) {
 			glm::vec3 o, d;
@@ -511,8 +466,7 @@ namespace Sandbox {
 
 	void EditorScene::UpdateDrag(const glm::vec2& cursor, const glm::vec2& viewport)
 	{
-		const SPtr<Camera> cam = (m_Mode == CameraMode::Orbit)
-			? m_OrbitCam.GetRenderCamera() : m_FlyCam.GetRenderCamera();
+		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
 		const bool snap = m_SnapToggle || CtrlDown();
 
 		if (m_Drag.tool == Tool::Translate) {
@@ -573,26 +527,12 @@ namespace Sandbox {
 	}
 
 
-	void EditorScene::UpdateActiveCamera(Timestep ts)
-	{
-		if (m_Mode == CameraMode::Orbit) {
-			m_OrbitCam.Update(ts);
-		} else {
-			float dy, dp;
-			ConsumeOrbitDeltas(dy, dp);
-			(void)ConsumeZoomDelta();
-			m_FlyCam.Update(ts);
-		}
-	}
-
-
 	void EditorScene::BuildGizmoPrimitives(const glm::vec2& /*viewport*/)
 	{
 		m_Gizmo->Clear();
 		if (!m_Selected || !m_HasContent) return;
 
-		const SPtr<Camera> cam = (m_Mode == CameraMode::Orbit)
-			? m_OrbitCam.GetRenderCamera() : m_FlyCam.GetRenderCamera();
+		const SPtr<Camera> cam = m_Camera->GetRenderCamera();
 		const glm::vec3 pivot = GizmoPivot();
 		const float L = GizmoWorldScale(cam);
 
@@ -629,15 +569,19 @@ namespace Sandbox {
 		const glm::vec2 viewport = glm::vec2(m_ScreenWidth, m_ScreenHeight);
 
 		HandleHotkeys();
-		HandleCameraModeArbitration();
+		// Editor mode flips orbit→fly only via JS bridge toggle (no auto-
+		// flip on WASDEQ — those keys belong to the camera while RMB is
+		// held, but we don't want a stray W during click+drag to break
+		// the mode).
+		HandleStandardCameraArbitration(/*autoFlipOnFlyKey=*/false);
+		DrainUnusedOrbitInput();
 		HandleMouseInteraction(viewport);
-		UpdateActiveCamera(ts);
+		m_Camera->Update(ts);
 
 		// Apply transform to splat renderer (cheap, sets matrix uniform).
 		if (m_Splats) m_Splats->SetModelMatrix(m_Transform.Matrix());
 
-		const SPtr<Camera> activeCam = (m_Mode == CameraMode::Orbit)
-		    ? m_OrbitCam.GetRenderCamera() : m_FlyCam.GetRenderCamera();
+		const SPtr<Camera> activeCam = m_Camera->GetRenderCamera();
 
 		const double frameStart = glfwGetTime();
 		if (m_Splats && m_PrevFrameStart > 0.0) {
@@ -674,8 +618,7 @@ namespace Sandbox {
 		if (m_Splats) {
 			auto& m = m_Splats->Metrics();
 			m.splatCount = static_cast<int>(m_SplatCount);
-			const glm::vec3 eye = (m_Mode == CameraMode::Orbit)
-			    ? m_OrbitCam.GetPosition() : m_FlyCam.GetPosition();
+			const glm::vec3 eye = m_Camera->GetPosition();
 			m.camEye[0] = eye.x; m.camEye[1] = eye.y; m.camEye[2] = eye.z;
 			m.Emit();
 		}
@@ -699,7 +642,7 @@ namespace Sandbox {
 		SplatData parsed = SplatLoader::LoadSplatFromBytes(data, size, "editor-upload");
 		if (parsed.Empty()) {
 			ERROR_CORE("EditorScene: splat parse returned no points");
-			PostEditorMessage("{\"type\":\"editor-error\",\"message\":\"Failed to parse splat\"}");
+			PostSceneMessage("{\"type\":\"editor-error\",\"message\":\"Failed to parse splat\"}");
 			return;
 		}
 
@@ -723,7 +666,7 @@ namespace Sandbox {
 		const glm::vec3 pivot = glm::vec3(0.0f);
 		const float radius = 3.0f;
 		const glm::vec3 eye = pivot + glm::vec3(0.0f, 0.4f, 1.0f) * radius;
-		m_OrbitCam.SetOrbit(pivot, eye);
+		SwitchCameraToOrbit(pivot, eye);
 
 		m_Selected = true;
 
@@ -732,7 +675,7 @@ namespace Sandbox {
 		std::snprintf(buf, sizeof(buf),
 		              "{\"type\":\"editor-splat-loaded\",\"count\":%llu}",
 		              (unsigned long long)m_SplatCount);
-		PostEditorMessage(buf);
+		PostSceneMessage(buf);
 		PostSelectionChanged();
 		PostTransformUpdate(true);
 	}
@@ -745,7 +688,7 @@ namespace Sandbox {
 		m_HasContent = false;
 		m_Selected   = false;
 		m_Transform  = Transform{};
-		PostEditorMessage("{\"type\":\"editor-scene-cleared\"}");
+		PostSceneMessage("{\"type\":\"editor-scene-cleared\"}");
 		PostSelectionChanged();
 	}
 
@@ -764,7 +707,7 @@ namespace Sandbox {
 		char buf[64];
 		std::snprintf(buf, sizeof(buf), "{\"type\":\"editor-snap\",\"on\":%s}",
 		              snap ? "true" : "false");
-		PostEditorMessage(buf);
+		PostSceneMessage(buf);
 	}
 
 
@@ -775,7 +718,7 @@ namespace Sandbox {
 		char buf[80];
 		std::snprintf(buf, sizeof(buf),
 		              "{\"type\":\"editor-tool-changed\",\"tool\":\"%s\"}", name);
-		PostEditorMessage(buf);
+		PostSceneMessage(buf);
 	}
 
 
@@ -787,7 +730,7 @@ namespace Sandbox {
 		              m_Selected ? "true" : "false",
 		              m_HasContent ? "true" : "false",
 		              (unsigned long long)m_SplatCount);
-		PostEditorMessage(buf);
+		PostSceneMessage(buf);
 	}
 
 
@@ -819,7 +762,7 @@ namespace Sandbox {
 		              m_Transform.position.x, m_Transform.position.y, m_Transform.position.z,
 		              eulerDeg.x, eulerDeg.y, eulerDeg.z,
 		              m_Transform.scale.x, m_Transform.scale.y, m_Transform.scale.z);
-		PostEditorMessage(buf);
+		PostSceneMessage(buf);
 	}
 
 

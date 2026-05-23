@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pch.h"
+#include "CameraController.h"
 #include "Renderer/Camera.h"
 #include "Core/Timestep.h"
 #include "glm/gtc/matrix_transform.hpp"
@@ -18,37 +19,41 @@ namespace Engine {
 	 * Mouse-look is intentionally instant: rotation feels worst when
 	 * smoothed (input lag), best when 1:1.
 	 *
-	 * Activated by the scene when the user presses any WASD key while in
-	 * orbit mode, or clicks the "fly" toggle in the toolbar. Disabled on
-	 * touch devices (no on-screen joystick).
+	 * Scenes interact with this through the CameraController base —
+	 * direct calls to SetPose() are still available when concrete-typed
+	 * access is convenient (e.g. inside SceneBase::SwitchCameraToFly).
 	 */
-	class FlyCamera
+	class FlyCamera : public CameraController
 	{
 	public:
 		FlyCamera(void) : m_Camera(MakeShared<Camera>()) {}
 		FlyCamera(const SPtr<Camera>& camera) : m_Camera(camera) {}
 
-		void SetPerspective(float fovy, float aspect, float zNear, float zFar) {
-			m_Camera->SetPerspective(fovy, aspect, zNear, zFar, m_Transform);
+		// --- CameraController -----------------------------------------------
+		void Update(Timestep ts) override;
+
+		const SPtr<Camera>& GetRenderCamera() const override { return m_Camera; }
+		glm::vec3 GetPosition() const override { return m_Position; }
+		glm::vec3 GetForward()  const override;
+		const glm::mat4& GetTransform() const override { return m_Transform; }
+
+		void SetPerspective(float fovYRad, float aspect, float zNear, float zFar) override
+		{
+			m_Camera->SetPerspective(fovYRad, aspect, zNear, zFar, m_Transform);
 		}
 
-		void Update(Engine::Timestep ts);
+		void SetDragButton(int glfwButton) override { m_DragButton = glfwButton; }
+		int  GetDragButton() const override { return m_DragButton; }
 
-		// Drop into this pose without any momentum carryover. Called on
-		// mode switch from orbit so the fly camera starts where the user
-		// last was, looking the same direction.
+		PoseSnapshot Snapshot() const override;
+		void         ApplySnapshot(const PoseSnapshot& s) override;
+
+		CameraMode Mode() const override { return CameraMode::Fly; }
+		bool       ConsumesOrbitInput() const override { return false; }
+
+		// --- FlyCamera-specific ---------------------------------------------
+		// Drop into this pose without any momentum carryover.
 		void SetPose(const glm::vec3& position, const glm::vec3& forward);
-
-		glm::vec3 GetPosition(void) const { return m_Position; }
-		glm::vec3 GetForward(void)  const;
-		const glm::mat4& GetTransform(void) const { return m_Transform; }
-		const SPtr<Camera> GetRenderCamera(void) const { return m_Camera; }
-
-		// Which mouse button has to be held to drag-look. Viewer scenes
-		// keep LMB (0); editor scenes flip to RMB (1) so LMB stays free
-		// for selection / gizmo. Matches GLFW button indices.
-		void SetDragButton(int glfwButton) { m_DragButton = glfwButton; }
-		int  GetDragButton() const { return m_DragButton; }
 
 		// Tunables (units in comments).
 		float m_MaxMoveSpeed   = 4.0f;   // world units / second at full tilt

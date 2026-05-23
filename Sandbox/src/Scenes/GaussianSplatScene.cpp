@@ -3,12 +3,9 @@
 #include "../SceneSelector.h"
 
 #include "Engine/Application.h"
-#include "Engine/Input.h"
-#include "Engine/KeyCodes.h"
 #include "Engine/Log.h"
 #include "Engine/Renderer/Renderer.h"
 #include "Engine/Renderer/SplatLoader.h"
-#include "Engine/VirtualInput.h"
 
 #include <GLFW/glfw3.h>
 #include <filesystem>
@@ -52,18 +49,6 @@ namespace Sandbox {
 			std::vector<uint8_t>  data;
 		};
 
-		void PostSplatMessage(const char* json) {
-			// Forward a JSON string to the parent frame. Wrapped in a
-			// try/catch since postMessage throws if the parent is gone.
-			EM_ASM({
-				try {
-					if (typeof window !== 'undefined' && window.parent !== window) {
-						window.parent.postMessage(JSON.parse(UTF8ToString($0)), '*');
-					}
-				} catch (e) {}
-			}, json);
-		}
-
 		void OnFetchSuccess(emscripten_fetch_t* f) {
 			auto* s = static_cast<FetchState*>(f->userData);
 			s->status = f->status;
@@ -89,14 +74,11 @@ namespace Sandbox {
 			              "{\"type\":\"splat-progress\",\"loaded\":%llu,\"total\":%llu}",
 			              (unsigned long long)f->dataOffset,
 			              (unsigned long long)f->totalBytes);
-			PostSplatMessage(buf);
+			SceneBase::PostSceneMessage(buf);
 		}
 
 		// Async fetch with ASYNCIFY-style busy wait: spin emscripten_sleep
-		// while the JS event loop downloads the blob. Fires `splat-progress`
-		// messages to the parent frame as bytes come in. Synchronous from
-		// the caller's perspective — returns parsed SplatData (empty on
-		// failure).
+		// while the JS event loop downloads the blob.
 		SplatData FetchSplatViaXHR(const std::string& url) {
 			FetchState state;
 
@@ -122,8 +104,7 @@ namespace Sandbox {
 				return {};
 			}
 
-			// Bytes are in — switch the parent's loader UI to "decoding".
-			PostSplatMessage("{\"type\":\"splat-decoding\"}");
+			SceneBase::PostSceneMessage("{\"type\":\"splat-decoding\"}");
 
 			return SplatLoader::LoadSplatFromBytes(
 				state.data.data(), state.data.size(), url.c_str());
@@ -132,17 +113,11 @@ namespace Sandbox {
 	#endif // __EMSCRIPTEN__
 
 
-		// Resolve the scene source path / URL from runtime params, falling
-		// back to the bundled train.splat asset for native dev when nothing
-		// was passed.
 		std::string ResolveSceneSource() {
 		#ifdef __EMSCRIPTEN__
 			if (auto u = ReadParam("scene_url"); u) return *u;
 		#endif
 			if (auto p = ReadParam("scene_path"); p) return *p;
-			// Native fallback for local dev: keep loading the bundled train
-			// scene. Once the file is removed from the repo the caller MUST
-			// pass --scene_path=<file>.
 			namespace fs = std::filesystem;
 			return (fs::path(ENGINE_ASSETS_DIR) / "splat" / "train.splat").string();
 		}
@@ -153,16 +128,14 @@ namespace Sandbox {
 	GaussianSplatScene::GaussianSplatScene(float screenWidth, float screenHeight)
 		: SceneBase("gsplat", screenWidth, screenHeight)
 	{
-		const float aspect = m_ScreenWidth / m_ScreenHeight;
-		m_OrbitCam.SetPerspective(glm::radians(45.0f), aspect, 0.1f, 10000.0f);
-		m_FlyCam  .SetPerspective(glm::radians(45.0f), aspect, 0.1f, 10000.0f);
+		// LMB camera (viewer convention). SceneBase reads this when
+		// constructing any camera through SwitchCameraTo*.
+		m_CameraConfig.dragButton = 0; // MOUSE_BUTTON_LEFT
 
 		const std::string source = ResolveSceneSource();
 
 		SplatData data;
 	#ifdef __EMSCRIPTEN__
-		// Web: scene_url is an absolute https URL; fall through to file
-		// load if someone passes a non-URL (debug only).
 		if (source.rfind("http://", 0) == 0 || source.rfind("https://", 0) == 0) {
 			data = FetchSplatViaXHR(source);
 		} else {
@@ -174,12 +147,13 @@ namespace Sandbox {
 
 		if (data.Empty()) {
 			ERROR_CORE("GaussianSplatScene: failed to load '{0}'", source);
+			// Still install a default orbit camera so the empty scene renders.
+			SwitchCameraToOrbit(glm::vec3(0.0f), kDefaultSpawn.eye);
 			return;
 		}
 		m_SplatCount = data.Count();
 
 		// Camera spawn: prefer query/CLI params, otherwise use defaults.
-		// ParseVec3 returns nullopt on bad input — fall through.
 		glm::vec3 eye = kDefaultSpawn.eye;
 		glm::vec3 fwd = glm::normalize(kDefaultSpawn.fwd);
 		if (auto s = ReadParam("eye"); s) {
@@ -189,23 +163,20 @@ namespace Sandbox {
 			if (auto v = ParseVec3(*s); v) fwd = glm::normalize(*v);
 		}
 
-		// Orbit target = robust centroid of the loaded splats. We compute
-		// it after parsing the file (positions in `data.positions`) so the
-		// orbit pivot matches the actual subject regardless of which
-		// scene-specific eye/fwd was passed. Filter by alpha to drop the
-		// transparent halo gaussians that drag the mean off-subject.
+		// Orbit target = alpha-weighted centroid of the loaded splats so the
+		// pivot matches the actual subject regardless of which scene-specific
+		// eye/fwd was passed.
 		glm::vec3 target(0.0f);
 		{
 			glm::dvec3 sum(0.0);
 			size_t kept = 0;
 			for (size_t i = 0; i < data.positions.size(); ++i) {
-				if (data.colors[i].a >= 32) {  // ≈ 12% sigmoid; same threshold as auto_frame_camera
+				if (data.colors[i].a >= 32) {
 					sum += glm::dvec3(data.positions[i]);
 					++kept;
 				}
 			}
 			if (kept == 0) {
-				// Fallback: all alphas low (degenerate scene). Use unfiltered mean.
 				for (const auto& p : data.positions) sum += glm::dvec3(p);
 				kept = std::max<size_t>(1, data.positions.size());
 			}
@@ -214,52 +185,26 @@ namespace Sandbox {
 
 		INFO_CORE("gsplat spawn: eye=({0},{1},{2}) target=({3},{4},{5})",
 		          eye.x, eye.y, eye.z, target.x, target.y, target.z);
-		m_OrbitCam.SetOrbit(target, eye);
+		SwitchCameraToOrbit(target, eye);
 
 		m_Splats = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
 		m_Splats->Upload(data);
 
 	#ifdef __EMSCRIPTEN__
-		// Tell the parent the splat is uploaded and we're about to start
-		// drawing — wrapper hides the loading bar on this signal.
-		PostSplatMessage("{\"type\":\"splat-ready\"}");
+		PostSceneMessage("{\"type\":\"splat-ready\"}");
 	#endif
 	}
 
 
 	void GaussianSplatScene::OnUpdate(Timestep ts)
 	{
-		// --- Camera mode arbitration. ---------------------------------------
-		// JS-requested mode (toolbar click) wins; otherwise pressing any
-		// fly key while in orbit auto-switches to fly so the user can just
-		// "press W and go".
-		const int requested = ConsumeRequestedMode();
-		if (requested == 0) {
-			SetMode(CameraMode::Orbit);
-		} else if (requested == 1) {
-			SetMode(CameraMode::Fly);
-		} else if (m_Mode == CameraMode::Orbit && AnyFlyKeyPressed()) {
-			SetMode(CameraMode::Fly);
-		}
+		HandleStandardCameraArbitration(/*autoFlipOnFlyKey=*/true);
+		DrainUnusedOrbitInput();
 
-		if (m_Mode == CameraMode::Orbit) {
-			m_OrbitCam.Update(ts);
-		} else {
-			// Drop any touch/pinch state accumulated by the JS bridge so it
-			// doesn't snap back into orbit on mode switch.
-			float discardYaw, discardPitch;
-			ConsumeOrbitDeltas(discardYaw, discardPitch);
-			(void)ConsumeZoomDelta();
-			m_FlyCam.Update(ts);
-		}
-
-		const SPtr<Camera> activeRenderCam = (m_Mode == CameraMode::Orbit)
-		    ? m_OrbitCam.GetRenderCamera()
-		    : m_FlyCam  .GetRenderCamera();
+		m_Camera->Update(ts);
+		const SPtr<Camera> activeRenderCam = m_Camera->GetRenderCamera();
 
 		// Frame-interval sample (CPU wallclock between scene tick starts).
-		// Captured before any encoding work so it reflects the user-visible
-		// rate, not just our sort/render budget.
 		const double frameStart = glfwGetTime();
 		if (m_Splats && m_PrevFrameStart > 0.0) {
 			m_Splats->Metrics().frameMs.Push(
@@ -267,19 +212,13 @@ namespace Sandbox {
 		}
 		m_PrevFrameStart = frameStart;
 
-		// Drain async timestamp readbacks from previous frames into the
-		// metrics ring before we schedule the next round.
 		if (m_Splats) m_Splats->TickPerf();
 
 		if (!Renderer::BeginScene(activeRenderCam)) {
 			return;
 		}
 
-		// GPU sort runs every frame, BEFORE the colour pass is opened
-		// (compute and render passes can't share an encoder once a render
-		// pass is active). The renderer reads only `sortedIndices` so
-		// re-sorting is just one buffer rewrite, not the bulk reshuffle
-		// the GL renderer used to do.
+		// GPU sort runs before the colour pass opens.
 		const double encodeStart = glfwGetTime();
 		const glm::mat4& view = activeRenderCam->GetViewMatrix();
 		const glm::mat4& proj = activeRenderCam->GetProjectionMatrix();
@@ -294,15 +233,7 @@ namespace Sandbox {
 			                       glm::vec2(m_ScreenWidth, m_ScreenHeight));
 		}
 
-		// The render pass writes its end-of-pass timestamp on close, so we
-		// have to close it BEFORE running ResolveAndReadTimestamps —
-		// otherwise the encoder is still locked by the open pass and the
-		// resolve call errors out.
 		Renderer::ClosePass();
-
-		// Resolve the four timestamp queries into the next ring slot. Has
-		// to happen while the encoder is still open and BEFORE the swap
-		// (Renderer::EndScene closes the pass and submits).
 		if (m_Splats) m_Splats->ResolveAndReadTimestamps(Renderer::Encoder());
 
 		const double encodeEnd = glfwGetTime();
@@ -310,17 +241,13 @@ namespace Sandbox {
 			auto& m = m_Splats->Metrics();
 			m.cpuEncodeMs.Push(static_cast<float>((encodeEnd - encodeStart) * 1000.0));
 			m.splatCount = static_cast<int>(m_SplatCount);
-			const glm::vec3 eye = (m_Mode == CameraMode::Orbit)
-			    ? m_OrbitCam.GetPosition()
-			    : m_FlyCam  .GetPosition();
+			const glm::vec3 eye = m_Camera->GetPosition();
 			m.camEye[0] = eye.x;
 			m.camEye[1] = eye.y;
 			m.camEye[2] = eye.z;
 			m.Emit();
 		}
 
-		// Roll a 60-frame FPS counter and print every 60 frames so we can
-		// see steady-state perf without the load-time outlier on frame 0.
 		++m_FpsCounter;
 		double now = glfwGetTime();
 		if (m_FpsT0 == 0.0) m_FpsT0 = now;
@@ -329,12 +256,8 @@ namespace Sandbox {
 			INFO_CORE("gsplat: 60 frames in {0:.3f}s = {1:.1f} fps", dt, 60.0f / dt);
 			m_FpsT0 = now;
 
-			// Periodic camera-pose dump so an interactive native session can
-			// fly to a pleasing angle and read off the eye/fwd values for
-			// the DB seed (camera_eye / camera_fwd columns).
-			const glm::mat4& t = (m_Mode == CameraMode::Orbit)
-			    ? m_OrbitCam.GetTransform()
-			    : m_FlyCam  .GetTransform();
+			// Periodic camera-pose dump for collecting eye/fwd for DB seeds.
+			const glm::mat4& t = m_Camera->GetTransform();
 			const glm::vec3 e = glm::vec3(t[3]);
 			const glm::vec3 f = -glm::vec3(t[2]);
 			INFO_CORE("gsplat camera: eye=({0:.3f},{1:.3f},{2:.3f}) fwd=({3:.3f},{4:.3f},{5:.3f})",
@@ -342,9 +265,6 @@ namespace Sandbox {
 		}
 
 		// Headless screenshot hook (single-shot capture + exit).
-		// GS_CAPTURE_FRAME (default 30) chooses which frame to grab —
-		// useful for capturing multiple frames in succession to diff
-		// inter-frame stability when chasing flicker.
 		++m_FrameCount;
 		int captureAt = 30;
 		if (const char* f = std::getenv("GS_CAPTURE_FRAME")) captureAt = std::atoi(f);
@@ -355,43 +275,6 @@ namespace Sandbox {
 		}
 
 		Renderer::EndScene();
-	}
-
-
-	bool GaussianSplatScene::AnyFlyKeyPressed() const
-	{
-		return Input::IsKeyPressed(KEY_W) || Input::IsKeyPressed(KEY_A)
-		    || Input::IsKeyPressed(KEY_S) || Input::IsKeyPressed(KEY_D)
-		    || Input::IsKeyPressed(KEY_Q) || Input::IsKeyPressed(KEY_E);
-	}
-
-
-	void GaussianSplatScene::SetMode(CameraMode mode)
-	{
-		if (mode == m_Mode) return;
-
-		// No view jump on either transition.
-		//   Orbit → fly: drop fly camera into the orbit pose.
-		//   Fly → orbit: re-pivot orbit around a point in front of the
-		//     fly camera at the previous orbit radius — user orbits
-		//     around whatever they aimed at, not the auto-framed centroid.
-		if (mode == CameraMode::Fly) {
-			const glm::vec3 eye = m_OrbitCam.GetPosition();
-			m_FlyCam.SetPose(eye, m_OrbitCam.GetTarget() - eye);
-		} else {
-			const glm::vec3 eye    = m_FlyCam.GetPosition();
-			const glm::vec3 fwd    = m_FlyCam.GetForward();
-			const float     radius = m_OrbitCam.GetRadius();
-			m_OrbitCam.SetOrbit(eye + fwd * radius, eye);
-		}
-
-		m_Mode = mode;
-
-	#ifdef __EMSCRIPTEN__
-		PostSplatMessage(mode == CameraMode::Orbit
-		    ? "{\"type\":\"camera-mode-changed\",\"mode\":\"orbit\"}"
-		    : "{\"type\":\"camera-mode-changed\",\"mode\":\"fly\"}");
-	#endif
 	}
 
 

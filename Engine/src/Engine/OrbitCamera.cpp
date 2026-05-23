@@ -147,4 +147,24 @@ namespace Engine {
 		m_Camera->RecalculateViewMatrix(m_Transform);
 	}
 
+
+	PoseSnapshot OrbitCamera::Snapshot() const
+	{
+		PoseSnapshot s;
+		s.position    = GetPosition();
+		s.forward     = glm::normalize(m_Target - s.position);
+		s.orbitTarget = m_Target;
+		s.orbitRadius = m_Radius;
+		return s;
+	}
+
+
+	void OrbitCamera::ApplySnapshot(const PoseSnapshot& s)
+	{
+		// SetOrbit re-derives radius from |eye - target|, so the orbit
+		// radius in the snapshot is already encoded in the position/
+		// target pair. We don't have to pass it explicitly.
+		SetOrbit(s.orbitTarget, s.position);
+	}
+
 }

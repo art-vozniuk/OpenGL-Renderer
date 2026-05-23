@@ -2,8 +2,6 @@
 
 #include "SceneBase.h"
 
-#include "Engine/FlyCamera.h"
-#include "Engine/OrbitCamera.h"
 #include "Engine/Core/Transform.h"
 #include "Engine/Renderer/GaussianSplatRenderer.h"
 #include "Engine/Renderer/GridRenderer.h"
@@ -47,8 +45,7 @@ namespace Sandbox {
 		static EditorScene* Current() { return s_Current; }
 
 	private:
-		enum class CameraMode { Orbit = 0, Fly = 1 };
-		enum class Tool       { Translate = 0, Rotate = 1, Scale = 2 };
+		enum class Tool { Translate = 0, Rotate = 1, Scale = 2 };
 
 		// Which gizmo handle the user is currently hovering / dragging.
 		// 0/1/2 = X/Y/Z axis; 3 = uniform (center for scale, screen-axis
@@ -75,9 +72,7 @@ namespace Sandbox {
 
 		// --- Per-frame routines ----------------------------------------------
 		void HandleHotkeys();
-		void HandleCameraModeArbitration();
 		void HandleMouseInteraction(const glm::vec2& viewport);
-		void UpdateActiveCamera(Engine::Timestep ts);
 
 		void BuildGizmoPrimitives(const glm::vec2& viewport);
 
@@ -111,10 +106,6 @@ namespace Sandbox {
 		void PostTransformUpdate(bool isFinal);
 		void PostToolChanged();
 		void PostSelectionChanged();
-
-		Engine::OrbitCamera m_OrbitCam;
-		Engine::FlyCamera   m_FlyCam;
-		CameraMode          m_Mode  = CameraMode::Fly;
 
 		std::unique_ptr<Engine::GridRenderer>          m_Grid;
 		std::unique_ptr<Engine::GaussianSplatRenderer> m_Splats;
