@@ -370,6 +370,16 @@ namespace Sandbox {
 	}
 
 
+	// Final render matrix: T * R * S * T(-pivotObj). Object-space points get
+	// re-centered on the pivot first so transform.position is literally where
+	// the pivot lands in world space.
+	static glm::mat4 BuildObjectModelMatrix(const EditorScene::EditorObject& o)
+	{
+		return o.transform.Matrix()
+		       * glm::translate(glm::mat4(1.0f), -o.pivotObj);
+	}
+
+
 	void EditorScene::ComputeWorldAabb(const EditorObject& o,
 	                                   glm::vec3& outMin, glm::vec3& outMax) const
 	{
@@ -377,17 +387,15 @@ namespace Sandbox {
 			outMin = outMax = glm::vec3(0.0f);
 			return;
 		}
-		TransformAabb(o.splat->BoundingBox(), o.transform.Matrix(), outMin, outMax);
+		TransformAabb(o.splat->BoundingBox(), BuildObjectModelMatrix(o), outMin, outMax);
 	}
 
 
 	glm::vec3 EditorScene::GizmoPivot() const
 	{
 		const auto* o = FindObject(m_Selected);
-		if (!o || !o->splat) return glm::vec3(0.0f);
-		glm::vec3 mn, mx;
-		ComputeWorldAabb(*o, mn, mx);
-		return (mn + mx) * 0.5f;
+		if (!o) return glm::vec3(0.0f);
+		return o->transform.position;
 	}
 
 
@@ -582,9 +590,6 @@ namespace Sandbox {
 			m_Drag.currentAngleRad = m_Drag.startAngleRad + delta;
 			const glm::quat dq = glm::angleAxis(delta, glm::normalize(axis));
 			o->transform.rotation = glm::normalize(dq * m_Drag.startTransform.rotation);
-			// Rotate-about-pivot: shift the object so the gizmo pivot is fixed.
-			const glm::vec3 offset = m_Drag.startTransform.position - pivot0;
-			o->transform.position = pivot0 + dq * offset;
 		} else if (m_Drag.kind == GizmoHit::Kind::ScaleAxis
 		        || m_Drag.kind == GizmoHit::Kind::ScaleUniform) {
 			glm::vec2 pivotPx;
@@ -595,16 +600,13 @@ namespace Sandbox {
 			o->transform.scale = m_Drag.startTransform.scale;
 			if (m_Drag.kind == GizmoHit::Kind::ScaleUniform || ShiftDown()) {
 				o->transform.scale *= factor;
-				// Uniform scale also pivots — keep gizmo center anchored.
-				const glm::vec3 offset = m_Drag.startTransform.position - pivot0;
-				o->transform.position = pivot0 + offset * factor;
 			} else {
 				o->transform.scale[m_Drag.axis] =
 					m_Drag.startTransform.scale[m_Drag.axis] * factor;
 			}
 		}
 
-		if (o->splat) o->splat->SetModelMatrix(o->transform.Matrix());
+		if (o->splat) o->splat->SetModelMatrix(BuildObjectModelMatrix(*o));
 		PostTransformUpdate(false);
 	}
 
@@ -812,7 +814,7 @@ namespace Sandbox {
 		const glm::mat4 proj = activeCam->GetProjectionMatrix();
 		for (auto& o : m_Objects) {
 			if (!o.splat || !o.visible) continue;
-			o.splat->SetModelMatrix(o.transform.Matrix());
+			o.splat->SetModelMatrix(BuildObjectModelMatrix(o));
 			o.splat->EncodeSort(Renderer::Encoder(), view, proj);
 		}
 
@@ -841,6 +843,22 @@ namespace Sandbox {
 		}
 
 		Renderer::EndScene();
+
+		// Throttled camera-pose broadcast for the React inspector.
+		static double s_lastCamPoseEmit = 0.0;
+		const double nowSec = glfwGetTime();
+		if (nowSec - s_lastCamPoseEmit > 0.10) {
+			s_lastCamPoseEmit = nowSec;
+			const glm::vec3 pos = m_Camera->GetPosition();
+			const glm::vec3 fwd = m_Camera->GetForward();
+			char buf[200];
+			std::snprintf(buf, sizeof(buf),
+			              "{\"type\":\"editor-camera-pose\","
+			              "\"position\":[%.4f,%.4f,%.4f],"
+			              "\"forward\":[%.4f,%.4f,%.4f]}",
+			              pos.x, pos.y, pos.z, fwd.x, fwd.y, fwd.z);
+			PostSceneMessage(buf);
+		}
 	}
 
 
@@ -863,13 +881,19 @@ namespace Sandbox {
 		o.name  = AutoNameFor(StripFilename(sourceName));
 		o.splat = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
 		o.splat->Upload(parsed);
-		// Center XZ on the centroid; lift Y so the bbox bottom sits on the grid.
-		const glm::vec3 c = o.splat->Centroid();
-		o.transform.position.x = -c.x;
-		o.transform.position.z = -c.z;
+		// Pivot = bbox bottom-center in object space. transform.position=(0,0,0)
+		// then lands the object exactly on the grid with pivot at world origin.
 		const auto& bb = o.splat->BoundingBox();
-		o.transform.position.y = bb.valid ? -bb.min.y : -c.y;
-		o.splat->SetModelMatrix(o.transform.Matrix());
+		if (bb.valid) {
+			o.pivotObj = glm::vec3(
+				(bb.min.x + bb.max.x) * 0.5f,
+				bb.min.y,
+				(bb.min.z + bb.max.z) * 0.5f);
+		} else {
+			o.pivotObj = o.splat->Centroid();
+		}
+		o.transform.position = glm::vec3(0.0f);
+		o.splat->SetModelMatrix(BuildObjectModelMatrix(o));
 		o.visible = true;
 
 		const ObjectId id = o.id;
@@ -961,8 +985,14 @@ namespace Sandbox {
 		o->transform.position = pos;
 		o->transform.rotation = glm::quat(glm::radians(eulerDeg));
 		o->transform.scale    = scale;
-		if (o->splat) o->splat->SetModelMatrix(o->transform.Matrix());
+		if (o->splat) o->splat->SetModelMatrix(BuildObjectModelMatrix(*o));
 		PostTransformUpdate(true);
+	}
+
+
+	void EditorScene::SetCameraPose(const glm::vec3& pos, const glm::vec3& fwd)
+	{
+		SwitchCameraToFly(pos, fwd);
 	}
 
 
@@ -1120,6 +1150,17 @@ EDITOR_EXPORT void editor_set_visibility(double id, int visible)
 	auto* s = ::Sandbox::EditorScene::Current();
 	if (!s) return;
 	s->SetVisibility(static_cast<::Sandbox::EditorScene::ObjectId>(id), visible != 0);
+}
+
+EDITOR_EXPORT void editor_set_camera_pose(double px, double py, double pz,
+                                          double fx, double fy, double fz)
+{
+	auto* s = ::Sandbox::EditorScene::Current();
+	if (!s) return;
+	const glm::vec3 fwd((float)fx, (float)fy, (float)fz);
+	const glm::vec3 pos((float)px, (float)py, (float)pz);
+	if (glm::length(fwd) < 1e-4f) return;
+	s->SetCameraPose(pos, glm::normalize(fwd));
 }
 
 EDITOR_EXPORT void editor_set_transform(double id,

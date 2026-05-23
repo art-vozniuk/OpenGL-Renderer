@@ -404,6 +404,16 @@ SCRIPT_PATCH = """<script>
       return;
     }
 
+    if (data.type === 'editor-set-camera-pose') {
+      if (!isReady()) return;
+      var p = data.position || [0,0,0];
+      var f = data.forward  || [0,0,-1];
+      Module.ccall('editor_set_camera_pose', null,
+                   ['number','number','number','number','number','number'],
+                   [p[0], p[1], p[2], f[0], f[1], f[2]]);
+      return;
+    }
+
     if (data.type === 'editor-set-snap') {
       if (!isReady()) return;
       Module.ccall('editor_set_snap', null, ['number'], [data.on ? 1 : 0]);

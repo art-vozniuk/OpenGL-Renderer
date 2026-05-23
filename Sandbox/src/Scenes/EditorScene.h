@@ -43,6 +43,10 @@ namespace Sandbox {
 			std::string       name;
 			Engine::Transform transform;
 			bool              visible = true;
+			// Object-space coordinates of the pivot (bbox bottom-center).
+			// Renderer applies T(-pivotObj) before T*R*S so transform.position
+			// directly equals the pivot's world position.
+			glm::vec3         pivotObj{0.0f};
 			std::unique_ptr<Engine::GaussianSplatRenderer> splat;
 		};
 
@@ -65,6 +69,9 @@ namespace Sandbox {
 		void     SetTransform(ObjectId id, const glm::vec3& pos,
 		                      const glm::vec3& eulerDeg, const glm::vec3& scale);
 		void     SetSnap(bool snap);
+		// Teleport the fly camera to (pos, looking along fwd). React calls
+		// this from the manifest hydrate path and from inspector edits.
+		void     SetCameraPose(const glm::vec3& pos, const glm::vec3& fwd);
 		void     ClearAll();
 
 		static EditorScene* Current() { return s_Current; }
