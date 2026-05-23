@@ -122,7 +122,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // For simplicity here, reconstruct from inverse-view via view matrix
     // columns: cam world = -transpose(view3) * view.t.
     let view3 = mat3x3<f32>(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
-    let camPos = -transpose(view3) * u.view[3].xyz;
+    // WGSL has no unary `-` for matrix; move the negation to the vector.
+    let camPos = transpose(view3) * -u.view[3].xyz;
     let V = normalize(camPos - in.worldPos);
 
     let L = normalize(u.lightDir.xyz);
