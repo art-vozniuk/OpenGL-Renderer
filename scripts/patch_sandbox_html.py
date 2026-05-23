@@ -251,13 +251,65 @@ SCRIPT_PATCH = """<script>
   // {type:'set-camera-mode', mode: 0|1} → C++ scene polls and switches.
   // Mode changes (including the C++ auto-switch on WASDEQ) are echoed
   // back to the parent from scene code via 'camera-mode-changed'.
+  //
+  // Editor scene also accepts two content-management messages:
+  //   {type:'editor-load-splat', bytes: ArrayBuffer}
+  //     — copies bytes onto the wasm heap and calls editor_load_splat_bytes.
+  //       The scene posts 'editor-splat-loaded' or 'editor-error' back.
+  //   {type:'editor-clear-scene'}
+  //     — drops loaded content.
   window.addEventListener('message', function (e) {
     var data = e && e.data;
-    if (!data || data.type !== 'set-camera-mode') return;
-    var mode = data.mode;
-    if (mode !== 0 && mode !== 1) return;
-    if (!isReady()) return;
-    Module.ccall('vinput_request_mode', null, ['number'], [mode]);
+    if (!data) return;
+
+    if (data.type === 'set-camera-mode') {
+      var mode = data.mode;
+      if (mode !== 0 && mode !== 1) return;
+      if (!isReady()) return;
+      Module.ccall('vinput_request_mode', null, ['number'], [mode]);
+      return;
+    }
+
+    if (data.type === 'editor-load-splat') {
+      if (!isReady()) {
+        // Defer one tick — covers the small window between renderer-ready
+        // and the first OnUpdate when the scene singleton becomes live.
+        setTimeout(function () {
+          window.dispatchEvent(new MessageEvent('message', { data: data }));
+        }, 50);
+        return;
+      }
+      var bytes = data.bytes;
+      if (!(bytes instanceof ArrayBuffer)) {
+        window.parent.postMessage({
+          type: 'editor-error',
+          message: 'editor-load-splat: bytes is not an ArrayBuffer'
+        }, '*');
+        return;
+      }
+      var view = new Uint8Array(bytes);
+      var ptr  = Module._malloc(view.length);
+      if (!ptr) {
+        window.parent.postMessage({
+          type: 'editor-error',
+          message: 'editor-load-splat: malloc failed (' + view.length + ' bytes)'
+        }, '*');
+        return;
+      }
+      try {
+        Module.HEAPU8.set(view, ptr);
+        Module.ccall('editor_load_splat_bytes', null, ['number', 'number'], [ptr, view.length]);
+      } finally {
+        Module._free(ptr);
+      }
+      return;
+    }
+
+    if (data.type === 'editor-clear-scene') {
+      if (!isReady()) return;
+      Module.ccall('editor_clear_scene', null, [], []);
+      return;
+    }
   });
 })();
 </script>"""

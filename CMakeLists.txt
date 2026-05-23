@@ -252,12 +252,15 @@ if(RENDERER_BUILD_SANDBOX)
             -sMAXIMUM_MEMORY=1073741824   # 1 GB
             -sSTACK_SIZE=5242880          # 5 MB
             --preload-file ${ASSETS_DIR}@/assets
-            -sEXPORTED_RUNTIME_METHODS=cwrap,ccall
-            # JS bridge for touch + pinch input: vinput_apply_orbit feeds
-            # 1-finger drag yaw/pitch deltas into OrbitCamera;
-            # vinput_apply_zoom feeds pinch + scroll-on-touch zoom deltas;
-            # vinput_request_mode toggles orbit/fly camera from the React UI.
-            -sEXPORTED_FUNCTIONS=_main,_vinput_apply_orbit,_vinput_apply_zoom,_vinput_request_mode
+            -sEXPORTED_RUNTIME_METHODS=cwrap,ccall,HEAPU8
+            # JS bridge:
+            #   vinput_*               — orbit / pinch / mode toggle from the React UI
+            #   editor_load_splat_bytes — push a .splat blob into the live EditorScene
+            #   editor_clear_scene     — drop loaded content
+            #   _malloc / _free        — JS allocates a heap buffer to copy the
+            #                            file bytes into before handing the
+            #                            pointer to editor_load_splat_bytes
+            -sEXPORTED_FUNCTIONS=_main,_vinput_apply_orbit,_vinput_apply_zoom,_vinput_request_mode,_editor_load_splat_bytes,_editor_clear_scene,_malloc,_free
             -sASSERTIONS=1
         )
         target_compile_options(Sandbox PRIVATE
