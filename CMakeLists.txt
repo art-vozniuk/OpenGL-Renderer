@@ -260,7 +260,7 @@ if(RENDERER_BUILD_SANDBOX)
             #   _malloc / _free        — JS allocates a heap buffer to copy the
             #                            file bytes into before handing the
             #                            pointer to editor_load_splat_bytes
-            -sEXPORTED_FUNCTIONS=_main,_vinput_apply_orbit,_vinput_apply_zoom,_vinput_request_mode,_editor_load_splat_bytes,_editor_clear_scene,_editor_select_object,_editor_delete_object,_editor_focus_object,_editor_rename_object,_editor_set_visibility,_editor_set_snap,_malloc,_free
+            -sEXPORTED_FUNCTIONS=_main,_vinput_apply_orbit,_vinput_apply_zoom,_vinput_request_mode,_editor_load_splat_bytes,_editor_clear_scene,_editor_select_object,_editor_delete_object,_editor_focus_object,_editor_rename_object,_editor_set_visibility,_editor_set_transform,_editor_set_snap,_malloc,_free
             -sASSERTIONS=1
         )
         target_compile_options(Sandbox PRIVATE

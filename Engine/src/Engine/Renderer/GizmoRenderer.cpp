@@ -39,15 +39,24 @@ namespace Engine {
 			return src;
 		}
 
-		// Pick any unit vector orthogonal to `axis`. Used as the seed
-		// direction for the ring's first chord; the rotate around `axis`
-		// then sweeps the rest.
 		glm::vec3 AnyOrthogonal(const glm::vec3& axis)
 		{
 			const glm::vec3 a = (std::abs(axis.x) < 0.5f)
 				? glm::vec3(1.0f, 0.0f, 0.0f)
 				: glm::vec3(0.0f, 1.0f, 0.0f);
 			return glm::normalize(glm::cross(axis, a));
+		}
+
+		WGPUBlendState AlphaBlend()
+		{
+			WGPUBlendComponent c{};
+			c.srcFactor = WGPUBlendFactor_SrcAlpha;
+			c.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+			c.operation = WGPUBlendOperation_Add;
+			WGPUBlendState b{};
+			b.color = c;
+			b.alpha = c;
+			return b;
 		}
 
 	} // namespace
@@ -62,10 +71,10 @@ namespace Engine {
 		ud.size  = sizeof(GizmoUniforms);
 		m_Uniform = wgpuDeviceCreateBuffer(m_Ctx->Device(), &ud);
 
-		// Initial capacity — enough for a single full-feature gizmo
-		// (translate arrows + rotate rings + scale cubes ~= 200 lines).
 		EnsureLineBufferCapacity(256);
-		CreatePipeline();
+		EnsureTriBufferCapacity(256);
+		CreateLinePipeline();
+		CreateTriPipeline();
 	}
 
 
@@ -78,16 +87,10 @@ namespace Engine {
 	void GizmoRenderer::EnsureLineBufferCapacity(size_t lineCount)
 	{
 		if (m_LineBuf && lineCount <= m_LineCap) return;
-
-		// Round up to next power of two so growth is amortised.
 		size_t cap = m_LineCap ? m_LineCap : 64;
 		while (cap < lineCount) cap *= 2;
 
-		if (m_LineBuf) {
-			wgpuBufferRelease(m_LineBuf);
-			m_LineBuf = nullptr;
-		}
-
+		if (m_LineBuf) { wgpuBufferRelease(m_LineBuf); m_LineBuf = nullptr; }
 		WGPUBufferDescriptor bd{};
 		bd.label = SV("gizmo-lines");
 		bd.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
@@ -95,54 +98,73 @@ namespace Engine {
 		m_LineBuf = wgpuDeviceCreateBuffer(m_Ctx->Device(), &bd);
 		m_LineCap = cap;
 
-		// Bind group needs to be rebuilt because the buffer handle changed.
-		// CreatePipeline rebuilds it from scratch; if the pipeline already
-		// exists we only need a new bind group.
-		if (m_BGL) {
-			if (m_BG) { wgpuBindGroupRelease(m_BG); m_BG = nullptr; }
-
+		if (m_LineBGL) {
+			if (m_LineBG) { wgpuBindGroupRelease(m_LineBG); m_LineBG = nullptr; }
 			std::array<WGPUBindGroupEntry, 2> e{};
-			e[0].binding = 0;
-			e[0].buffer  = m_Uniform;
-			e[0].size    = sizeof(GizmoUniforms);
-			e[1].binding = 1;
-			e[1].buffer  = m_LineBuf;
-			e[1].size    = WGPU_WHOLE_SIZE;
-
+			e[0].binding = 0; e[0].buffer = m_Uniform; e[0].size = sizeof(GizmoUniforms);
+			e[1].binding = 1; e[1].buffer = m_LineBuf; e[1].size = WGPU_WHOLE_SIZE;
 			WGPUBindGroupDescriptor bgd{};
-			bgd.label      = SV("gizmo-bg");
-			bgd.layout     = m_BGL;
+			bgd.label = SV("gizmo-line-bg");
+			bgd.layout = m_LineBGL;
 			bgd.entryCount = e.size();
-			bgd.entries    = e.data();
-			m_BG = wgpuDeviceCreateBindGroup(m_Ctx->Device(), &bgd);
+			bgd.entries = e.data();
+			m_LineBG = wgpuDeviceCreateBindGroup(m_Ctx->Device(), &bgd);
 		}
 	}
 
 
-	void GizmoRenderer::CreatePipeline()
+	void GizmoRenderer::EnsureTriBufferCapacity(size_t triCount)
+	{
+		if (m_TriBuf && triCount <= m_TriCap) return;
+		size_t cap = m_TriCap ? m_TriCap : 64;
+		while (cap < triCount) cap *= 2;
+
+		if (m_TriBuf) { wgpuBufferRelease(m_TriBuf); m_TriBuf = nullptr; }
+		WGPUBufferDescriptor bd{};
+		bd.label = SV("gizmo-tris");
+		bd.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+		bd.size  = cap * sizeof(TriEntry);
+		m_TriBuf = wgpuDeviceCreateBuffer(m_Ctx->Device(), &bd);
+		m_TriCap = cap;
+
+		if (m_TriBGL) {
+			if (m_TriBG) { wgpuBindGroupRelease(m_TriBG); m_TriBG = nullptr; }
+			std::array<WGPUBindGroupEntry, 2> e{};
+			e[0].binding = 0; e[0].buffer = m_Uniform; e[0].size = sizeof(GizmoUniforms);
+			e[1].binding = 1; e[1].buffer = m_TriBuf;  e[1].size = WGPU_WHOLE_SIZE;
+			WGPUBindGroupDescriptor bgd{};
+			bgd.label = SV("gizmo-tri-bg");
+			bgd.layout = m_TriBGL;
+			bgd.entryCount = e.size();
+			bgd.entries = e.data();
+			m_TriBG = wgpuDeviceCreateBindGroup(m_Ctx->Device(), &bgd);
+		}
+	}
+
+
+	void GizmoRenderer::CreateLinePipeline()
 	{
 		std::array<WGPUBindGroupLayoutEntry, 2> entries{};
 		entries[0].binding    = 0;
 		entries[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
 		entries[0].buffer.type           = WGPUBufferBindingType_Uniform;
 		entries[0].buffer.minBindingSize = sizeof(GizmoUniforms);
-
 		entries[1].binding    = 1;
 		entries[1].visibility = WGPUShaderStage_Vertex;
 		entries[1].buffer.type           = WGPUBufferBindingType_ReadOnlyStorage;
 		entries[1].buffer.minBindingSize = sizeof(LineEntry);
 
 		WGPUBindGroupLayoutDescriptor bglDesc{};
-		bglDesc.label      = SV("gizmo-bgl");
+		bglDesc.label      = SV("gizmo-line-bgl");
 		bglDesc.entryCount = entries.size();
 		bglDesc.entries    = entries.data();
-		m_BGL = wgpuDeviceCreateBindGroupLayout(m_Ctx->Device(), &bglDesc);
+		m_LineBGL = wgpuDeviceCreateBindGroupLayout(m_Ctx->Device(), &bglDesc);
 
 		WGPUPipelineLayoutDescriptor plDesc{};
-		plDesc.label                = SV("gizmo-pl");
+		plDesc.label                = SV("gizmo-line-pl");
 		plDesc.bindGroupLayoutCount = 1;
-		plDesc.bindGroupLayouts     = &m_BGL;
-		m_PL = wgpuDeviceCreatePipelineLayout(m_Ctx->Device(), &plDesc);
+		plDesc.bindGroupLayouts     = &m_LineBGL;
+		m_LinePL = wgpuDeviceCreatePipelineLayout(m_Ctx->Device(), &plDesc);
 
 		const std::string src = LoadShaderSource("gizmo.wgsl");
 		WGPUShaderSourceWGSL wgsl{};
@@ -153,15 +175,7 @@ namespace Engine {
 		sm.label       = SV("gizmo.wgsl");
 		WGPUShaderModule shader = wgpuDeviceCreateShaderModule(m_Ctx->Device(), &sm);
 
-		// Alpha-blend so dimmed (low-alpha) handles ghost through neatly.
-		WGPUBlendComponent colorBlend{};
-		colorBlend.srcFactor = WGPUBlendFactor_SrcAlpha;
-		colorBlend.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
-		colorBlend.operation = WGPUBlendOperation_Add;
-		WGPUBlendState blend{};
-		blend.color = colorBlend;
-		blend.alpha = colorBlend;
-
+		WGPUBlendState blend = AlphaBlend();
 		WGPUColorTargetState target{};
 		target.format    = m_Ctx->SurfaceFormat();
 		target.blend     = &blend;
@@ -174,8 +188,8 @@ namespace Engine {
 		fs.targets     = &target;
 
 		WGPURenderPipelineDescriptor pdesc{};
-		pdesc.label                  = SV("gizmo-pipe");
-		pdesc.layout                 = m_PL;
+		pdesc.label                  = SV("gizmo-line-pipe");
+		pdesc.layout                 = m_LinePL;
 		pdesc.vertex.module          = shader;
 		pdesc.vertex.entryPoint      = SV("vs_main");
 		pdesc.primitive.topology     = WGPUPrimitiveTopology_TriangleList;
@@ -183,26 +197,88 @@ namespace Engine {
 		pdesc.multisample.count      = 1;
 		pdesc.multisample.mask       = 0xFFFFFFFFu;
 		pdesc.fragment               = &fs;
-		m_Pipe = wgpuDeviceCreateRenderPipeline(m_Ctx->Device(), &pdesc);
-
+		m_LinePipe = wgpuDeviceCreateRenderPipeline(m_Ctx->Device(), &pdesc);
 		wgpuShaderModuleRelease(shader);
 
-		// First bind group binds the line buffer that EnsureLineBufferCapacity
-		// already created in the constructor.
 		std::array<WGPUBindGroupEntry, 2> bge{};
-		bge[0].binding = 0;
-		bge[0].buffer  = m_Uniform;
-		bge[0].size    = sizeof(GizmoUniforms);
-		bge[1].binding = 1;
-		bge[1].buffer  = m_LineBuf;
-		bge[1].size    = WGPU_WHOLE_SIZE;
-
+		bge[0].binding = 0; bge[0].buffer = m_Uniform; bge[0].size = sizeof(GizmoUniforms);
+		bge[1].binding = 1; bge[1].buffer = m_LineBuf; bge[1].size = WGPU_WHOLE_SIZE;
 		WGPUBindGroupDescriptor bgd{};
-		bgd.label      = SV("gizmo-bg");
-		bgd.layout     = m_BGL;
+		bgd.label      = SV("gizmo-line-bg");
+		bgd.layout     = m_LineBGL;
 		bgd.entryCount = bge.size();
 		bgd.entries    = bge.data();
-		m_BG = wgpuDeviceCreateBindGroup(m_Ctx->Device(), &bgd);
+		m_LineBG = wgpuDeviceCreateBindGroup(m_Ctx->Device(), &bgd);
+	}
+
+
+	void GizmoRenderer::CreateTriPipeline()
+	{
+		std::array<WGPUBindGroupLayoutEntry, 2> entries{};
+		entries[0].binding    = 0;
+		entries[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+		entries[0].buffer.type           = WGPUBufferBindingType_Uniform;
+		entries[0].buffer.minBindingSize = sizeof(GizmoUniforms);
+		entries[1].binding    = 1;
+		entries[1].visibility = WGPUShaderStage_Vertex;
+		entries[1].buffer.type           = WGPUBufferBindingType_ReadOnlyStorage;
+		entries[1].buffer.minBindingSize = sizeof(TriEntry);
+
+		WGPUBindGroupLayoutDescriptor bglDesc{};
+		bglDesc.label      = SV("gizmo-tri-bgl");
+		bglDesc.entryCount = entries.size();
+		bglDesc.entries    = entries.data();
+		m_TriBGL = wgpuDeviceCreateBindGroupLayout(m_Ctx->Device(), &bglDesc);
+
+		WGPUPipelineLayoutDescriptor plDesc{};
+		plDesc.label                = SV("gizmo-tri-pl");
+		plDesc.bindGroupLayoutCount = 1;
+		plDesc.bindGroupLayouts     = &m_TriBGL;
+		m_TriPL = wgpuDeviceCreatePipelineLayout(m_Ctx->Device(), &plDesc);
+
+		const std::string src = LoadShaderSource("gizmo_tri.wgsl");
+		WGPUShaderSourceWGSL wgsl{};
+		wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+		wgsl.code        = SV(src.c_str());
+		WGPUShaderModuleDescriptor sm{};
+		sm.nextInChain = &wgsl.chain;
+		sm.label       = SV("gizmo_tri.wgsl");
+		WGPUShaderModule shader = wgpuDeviceCreateShaderModule(m_Ctx->Device(), &sm);
+
+		WGPUBlendState blend = AlphaBlend();
+		WGPUColorTargetState target{};
+		target.format    = m_Ctx->SurfaceFormat();
+		target.blend     = &blend;
+		target.writeMask = WGPUColorWriteMask_All;
+
+		WGPUFragmentState fs{};
+		fs.module      = shader;
+		fs.entryPoint  = SV("fs_main");
+		fs.targetCount = 1;
+		fs.targets     = &target;
+
+		WGPURenderPipelineDescriptor pdesc{};
+		pdesc.label                  = SV("gizmo-tri-pipe");
+		pdesc.layout                 = m_TriPL;
+		pdesc.vertex.module          = shader;
+		pdesc.vertex.entryPoint      = SV("vs_main");
+		pdesc.primitive.topology     = WGPUPrimitiveTopology_TriangleList;
+		pdesc.primitive.cullMode     = WGPUCullMode_None;
+		pdesc.multisample.count      = 1;
+		pdesc.multisample.mask       = 0xFFFFFFFFu;
+		pdesc.fragment               = &fs;
+		m_TriPipe = wgpuDeviceCreateRenderPipeline(m_Ctx->Device(), &pdesc);
+		wgpuShaderModuleRelease(shader);
+
+		std::array<WGPUBindGroupEntry, 2> bge{};
+		bge[0].binding = 0; bge[0].buffer = m_Uniform; bge[0].size = sizeof(GizmoUniforms);
+		bge[1].binding = 1; bge[1].buffer = m_TriBuf;  bge[1].size = WGPU_WHOLE_SIZE;
+		WGPUBindGroupDescriptor bgd{};
+		bgd.label      = SV("gizmo-tri-bg");
+		bgd.layout     = m_TriBGL;
+		bgd.entryCount = bge.size();
+		bgd.entries    = bge.data();
+		m_TriBG = wgpuDeviceCreateBindGroup(m_Ctx->Device(), &bgd);
 	}
 
 
@@ -214,13 +290,10 @@ namespace Engine {
 		const glm::vec3 tip = pivot + d * length;
 		AddLine(pivot, tip, color, thicknessPx);
 
-		// V-tip: two short lines from `tip` back along axis at ±30°.
 		const float tipLen   = length * 0.18f;
 		const float tipAng   = glm::radians(30.0f);
-		// Pick any orthonormal "right" relative to axis dir.
 		const glm::vec3 right = AnyOrthogonal(d);
 		const glm::vec3 backDir = -d;
-
 		const float ca = std::cos(tipAng);
 		const float sa = std::sin(tipAng);
 		const glm::vec3 v1 = glm::normalize(backDir * ca + right * sa);
@@ -230,19 +303,71 @@ namespace Engine {
 	}
 
 
+	void GizmoRenderer::AddArrowHead(const glm::vec3& tip, const glm::vec3& axisDir,
+	                                 float headLen, float headWidth,
+	                                 const glm::vec3& cameraPos, const glm::vec4& color)
+	{
+		const glm::vec3 d = glm::normalize(axisDir);
+		const glm::vec3 base = tip - d * headLen;
+		// Billboard "sideways" — perpendicular to both axis and view direction
+		// so the arrowhead always presents broadside to the camera.
+		const glm::vec3 toCam = glm::normalize(cameraPos - base);
+		glm::vec3 side = glm::cross(d, toCam);
+		const float sl = glm::length(side);
+		if (sl < 1e-5f) side = AnyOrthogonal(d);
+		else            side = side / sl;
+		const glm::vec3 baseL = base - side * headWidth * 0.5f;
+		const glm::vec3 baseR = base + side * headWidth * 0.5f;
+		// Two-triangle "diamond" so the head looks solid from either side.
+		AddTri(tip, baseR, baseL, color);
+		const glm::vec3 perp = glm::cross(d, side);
+		const glm::vec3 baseT = base + perp * headWidth * 0.35f;
+		const glm::vec3 baseB = base - perp * headWidth * 0.35f;
+		AddTri(tip, baseT, baseB, color);
+	}
+
+
 	void GizmoRenderer::AddRing(const glm::vec3& center, const glm::vec3& axis,
 	                            float radius, const glm::vec4& color,
 	                            int segments, float thicknessPx)
 	{
+		AddArc(center, axis, radius, 0.0f, glm::two_pi<float>(),
+		       color, segments, thicknessPx);
+	}
+
+
+	void GizmoRenderer::AddArc(const glm::vec3& center, const glm::vec3& axis,
+	                           float radius, float startRad, float endRad,
+	                           const glm::vec4& color, int segments,
+	                           float thicknessPx)
+	{
 		const glm::vec3 u = AnyOrthogonal(axis);
 		const glm::vec3 v = glm::normalize(glm::cross(axis, u));
+		const float span = endRad - startRad;
+		glm::vec3 prev = center + (std::cos(startRad) * u + std::sin(startRad) * v) * radius;
+		for (int i = 1; i <= segments; ++i) {
+			const float t = static_cast<float>(i) / static_cast<float>(segments);
+			const float a = startRad + span * t;
+			const glm::vec3 next = center + (std::cos(a) * u + std::sin(a) * v) * radius;
+			AddLine(prev, next, color, thicknessPx);
+			prev = next;
+		}
+	}
 
+
+	void GizmoRenderer::AddDisk(const glm::vec3& center, float radius,
+	                            const glm::vec3& cameraPos, const glm::vec4& color,
+	                            int segments)
+	{
+		const glm::vec3 viewDir = glm::normalize(center - cameraPos);
+		const glm::vec3 u = AnyOrthogonal(viewDir);
+		const glm::vec3 v = glm::normalize(glm::cross(viewDir, u));
 		glm::vec3 prev = center + u * radius;
 		for (int i = 1; i <= segments; ++i) {
 			const float t = static_cast<float>(i) / static_cast<float>(segments);
 			const float a = t * glm::two_pi<float>();
 			const glm::vec3 next = center + (std::cos(a) * u + std::sin(a) * v) * radius;
-			AddLine(prev, next, color, thicknessPx);
+			AddTri(center, prev, next, color);
 			prev = next;
 		}
 	}
@@ -253,24 +378,17 @@ namespace Engine {
 	{
 		const float h = size * 0.5f;
 		const glm::vec3 c[8] = {
-			center + glm::vec3(-h, -h, -h),  // 0
-			center + glm::vec3( h, -h, -h),  // 1
-			center + glm::vec3( h,  h, -h),  // 2
-			center + glm::vec3(-h,  h, -h),  // 3
-			center + glm::vec3(-h, -h,  h),  // 4
-			center + glm::vec3( h, -h,  h),  // 5
-			center + glm::vec3( h,  h,  h),  // 6
-			center + glm::vec3(-h,  h,  h),  // 7
+			center + glm::vec3(-h, -h, -h), center + glm::vec3( h, -h, -h),
+			center + glm::vec3( h,  h, -h), center + glm::vec3(-h,  h, -h),
+			center + glm::vec3(-h, -h,  h), center + glm::vec3( h, -h,  h),
+			center + glm::vec3( h,  h,  h), center + glm::vec3(-h,  h,  h),
 		};
-		// 12 edges
 		const int E[12][2] = {
-			{0,1},{1,2},{2,3},{3,0}, // bottom
-			{4,5},{5,6},{6,7},{7,4}, // top
-			{0,4},{1,5},{2,6},{3,7}, // verticals
+			{0,1},{1,2},{2,3},{3,0},
+			{4,5},{5,6},{6,7},{7,4},
+			{0,4},{1,5},{2,6},{3,7},
 		};
-		for (int i = 0; i < 12; ++i) {
-			AddLine(c[E[i][0]], c[E[i][1]], color, thicknessPx);
-		}
+		for (int i = 0; i < 12; ++i) AddLine(c[E[i][0]], c[E[i][1]], color, thicknessPx);
 	}
 
 
@@ -294,9 +412,7 @@ namespace Engine {
 	                                 const SPtr<Camera>& camera,
 	                                 const glm::vec2& viewportSize)
 	{
-		if (m_Lines.empty()) return;
-
-		EnsureLineBufferCapacity(m_Lines.size());
+		if (m_Lines.empty() && m_Tris.empty()) return;
 
 		const glm::mat4 vp = camera->GetProjectionMatrix() * camera->GetViewMatrix();
 		GizmoUniforms gu{};
@@ -304,25 +420,44 @@ namespace Engine {
 		gu.viewportSize = viewportSize;
 		wgpuQueueWriteBuffer(m_Ctx->Queue(), m_Uniform, 0, &gu, sizeof(gu));
 
-		// Upload visible lines.
-		const size_t bytes = m_Lines.size() * sizeof(LineEntry);
-		wgpuQueueWriteBuffer(m_Ctx->Queue(), m_LineBuf, 0, m_Lines.data(), bytes);
+		// Tris first so lines overlay on top (look "in front" of arrowheads).
+		if (!m_Tris.empty()) {
+			EnsureTriBufferCapacity(m_Tris.size());
+			wgpuQueueWriteBuffer(m_Ctx->Queue(), m_TriBuf, 0,
+			                     m_Tris.data(), m_Tris.size() * sizeof(TriEntry));
+			wgpuRenderPassEncoderSetPipeline(pass, m_TriPipe);
+			wgpuRenderPassEncoderSetBindGroup(pass, 0, m_TriBG, 0, nullptr);
+			wgpuRenderPassEncoderDraw(pass, 3, static_cast<uint32_t>(m_Tris.size()), 0, 0);
+		}
 
-		wgpuRenderPassEncoderSetPipeline(pass, m_Pipe);
-		wgpuRenderPassEncoderSetBindGroup(pass, 0, m_BG, 0, nullptr);
-		wgpuRenderPassEncoderDraw(pass, 6, static_cast<uint32_t>(m_Lines.size()), 0, 0);
+		if (!m_Lines.empty()) {
+			EnsureLineBufferCapacity(m_Lines.size());
+			wgpuQueueWriteBuffer(m_Ctx->Queue(), m_LineBuf, 0,
+			                     m_Lines.data(), m_Lines.size() * sizeof(LineEntry));
+			wgpuRenderPassEncoderSetPipeline(pass, m_LinePipe);
+			wgpuRenderPassEncoderSetBindGroup(pass, 0, m_LineBG, 0, nullptr);
+			wgpuRenderPassEncoderDraw(pass, 6, static_cast<uint32_t>(m_Lines.size()), 0, 0);
+		}
 	}
 
 
 	void GizmoRenderer::DestroyGpuResources()
 	{
-		if (m_Pipe)    { wgpuRenderPipelineRelease(m_Pipe);    m_Pipe    = nullptr; }
-		if (m_BG)      { wgpuBindGroupRelease(m_BG);           m_BG      = nullptr; }
-		if (m_PL)      { wgpuPipelineLayoutRelease(m_PL);      m_PL      = nullptr; }
-		if (m_BGL)     { wgpuBindGroupLayoutRelease(m_BGL);    m_BGL     = nullptr; }
-		if (m_Uniform) { wgpuBufferRelease(m_Uniform);         m_Uniform = nullptr; }
-		if (m_LineBuf) { wgpuBufferRelease(m_LineBuf);         m_LineBuf = nullptr; }
+		if (m_LinePipe) { wgpuRenderPipelineRelease(m_LinePipe); m_LinePipe = nullptr; }
+		if (m_LineBG)   { wgpuBindGroupRelease(m_LineBG);        m_LineBG   = nullptr; }
+		if (m_LinePL)   { wgpuPipelineLayoutRelease(m_LinePL);   m_LinePL   = nullptr; }
+		if (m_LineBGL)  { wgpuBindGroupLayoutRelease(m_LineBGL); m_LineBGL  = nullptr; }
+		if (m_LineBuf)  { wgpuBufferRelease(m_LineBuf);          m_LineBuf  = nullptr; }
 		m_LineCap = 0;
+
+		if (m_TriPipe) { wgpuRenderPipelineRelease(m_TriPipe); m_TriPipe = nullptr; }
+		if (m_TriBG)   { wgpuBindGroupRelease(m_TriBG);        m_TriBG   = nullptr; }
+		if (m_TriPL)   { wgpuPipelineLayoutRelease(m_TriPL);   m_TriPL   = nullptr; }
+		if (m_TriBGL)  { wgpuBindGroupLayoutRelease(m_TriBGL); m_TriBGL  = nullptr; }
+		if (m_TriBuf)  { wgpuBufferRelease(m_TriBuf);          m_TriBuf  = nullptr; }
+		m_TriCap = 0;
+
+		if (m_Uniform) { wgpuBufferRelease(m_Uniform); m_Uniform = nullptr; }
 	}
 
 }

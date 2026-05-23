@@ -393,6 +393,17 @@ SCRIPT_PATCH = """<script>
       return;
     }
 
+    if (data.type === 'editor-set-transform') {
+      if (!isReady()) return;
+      var p = data.position || [0,0,0];
+      var r = data.rotationDeg || [0,0,0];
+      var s = data.scale || [1,1,1];
+      Module.ccall('editor_set_transform', null,
+                   ['number','number','number','number','number','number','number','number','number','number'],
+                   [data.id || 0, p[0], p[1], p[2], r[0], r[1], r[2], s[0], s[1], s[2]]);
+      return;
+    }
+
     if (data.type === 'editor-set-snap') {
       if (!isReady()) return;
       Module.ccall('editor_set_snap', null, ['number'], [data.on ? 1 : 0]);

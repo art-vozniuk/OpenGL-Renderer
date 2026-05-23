@@ -268,7 +268,7 @@ namespace Sandbox {
 		                       const glm::vec4& col, float thickness)
 		{
 			const glm::vec3 ext = mx - mn;
-			const float bracketLen = std::min({ext.x, ext.y, ext.z}) * 0.18f;
+			const float bracketLen = std::min({ext.x, ext.y, ext.z}) * 0.08f;
 
 			for (int cz = 0; cz < 2; ++cz) {
 			for (int cy = 0; cy < 2; ++cy) {
@@ -576,14 +576,15 @@ namespace Sandbox {
 			const glm::vec3 r = hp - pivot0;
 			const float ang = std::atan2(glm::dot(r, v), glm::dot(r, u));
 			float delta = ang - m_Drag.startAngleRad;
-			// Keep delta in (-π, π] so swinging past the ±π seam doesn't
-			// rotate the object by ~2π in the wrong direction.
 			while (delta >  glm::pi<float>()) delta -= glm::two_pi<float>();
 			while (delta < -glm::pi<float>()) delta += glm::two_pi<float>();
 			if (snap) delta = SnapTo(delta, kSnapRotateRad);
 			m_Drag.currentAngleRad = m_Drag.startAngleRad + delta;
 			const glm::quat dq = glm::angleAxis(delta, glm::normalize(axis));
 			o->transform.rotation = glm::normalize(dq * m_Drag.startTransform.rotation);
+			// Rotate-about-pivot: shift the object so the gizmo pivot is fixed.
+			const glm::vec3 offset = m_Drag.startTransform.position - pivot0;
+			o->transform.position = pivot0 + dq * offset;
 		} else if (m_Drag.kind == GizmoHit::Kind::ScaleAxis
 		        || m_Drag.kind == GizmoHit::Kind::ScaleUniform) {
 			glm::vec2 pivotPx;
@@ -594,6 +595,9 @@ namespace Sandbox {
 			o->transform.scale = m_Drag.startTransform.scale;
 			if (m_Drag.kind == GizmoHit::Kind::ScaleUniform || ShiftDown()) {
 				o->transform.scale *= factor;
+				// Uniform scale also pivots — keep gizmo center anchored.
+				const glm::vec3 offset = m_Drag.startTransform.position - pivot0;
+				o->transform.position = pivot0 + offset * factor;
 			} else {
 				o->transform.scale[m_Drag.axis] =
 					m_Drag.startTransform.scale[m_Drag.axis] * factor;
@@ -685,7 +689,7 @@ namespace Sandbox {
 			const bool sel = (o.id == m_Selected);
 			AddCornerBrackets(*m_Gizmo, mn, mx,
 			                  sel ? kBboxColSelected : kBboxColUnselected,
-			                  sel ? 2.0f : 1.5f);
+			                  sel ? 3.0f : 2.0f);
 		}
 
 		// Transform gizmo on the selected object.
@@ -701,40 +705,51 @@ namespace Sandbox {
 			return m_Hover.kind == k && m_Hover.axis == a;
 		};
 
+		const glm::vec3 camPos = CameraWorldPos(cam);
+
 		for (int a = 0; a < 3; ++a) {
 			const glm::vec4 baseCol = kAxisCol[a];
 			const glm::vec3 axisDir = AxisDir(a);
 
-			// Translate arrow (stem + V-tip).
+			// Translate: chunky stem + big solid arrowhead.
 			{
 				const bool h = isHover(GizmoHit::Kind::TranslateAxis, a);
 				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
-				m_Gizmo->AddArrow(pivot, axisDir, L * kShaftFrac, c, 3.0f);
+				const glm::vec3 tip = pivot + axisDir * L * kShaftFrac;
+				m_Gizmo->AddLine(pivot, tip, c, 5.5f);
+				m_Gizmo->AddArrowHead(tip, axisDir, L * 0.24f, L * 0.14f, camPos, c);
 			}
 
-			// Rotate ring (48 segments).
+			// Rotate: front-facing arc only.
 			{
 				const bool h = isHover(GizmoHit::Kind::RotateRing, a);
 				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
-				m_Gizmo->AddRing(pivot, axisDir, L * kRingFrac, c, 48, 2.0f);
+				const glm::vec3 u = (std::abs(axisDir.x) < 0.5f)
+					? glm::normalize(glm::cross(axisDir, glm::vec3(1,0,0)))
+					: glm::normalize(glm::cross(axisDir, glm::vec3(0,1,0)));
+				const glm::vec3 v = glm::normalize(glm::cross(axisDir, u));
+				const glm::vec3 toCam = glm::normalize(camPos - pivot);
+				const float centerAng = std::atan2(glm::dot(toCam, v), glm::dot(toCam, u));
+				const float halfSpan  = glm::radians(80.0f);
+				m_Gizmo->AddArc(pivot, axisDir, L * kRingFrac,
+				                centerAng - halfSpan, centerAng + halfSpan,
+				                c, 32, 4.5f);
 			}
 
-			// Scale stem + cube at L. Stem is short (kRingFrac → kCubeFrac).
+			// Scale: filled disk at axis tip.
 			{
 				const bool h = isHover(GizmoHit::Kind::ScaleAxis, a);
 				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
-				const glm::vec3 stemStart = pivot + axisDir * L * kRingFrac;
-				const glm::vec3 cubeCenter = pivot + axisDir * L * kCubeFrac;
-				m_Gizmo->AddLine(stemStart, cubeCenter, c, 3.0f);
-				m_Gizmo->AddWireCube(cubeCenter, L * kCubeSize, c, 2.0f);
+				const glm::vec3 ballCenter = pivot + axisDir * L * kCubeFrac;
+				m_Gizmo->AddDisk(ballCenter, L * 0.07f, camPos, c, 16);
 			}
 		}
 
-		// Center cube (uniform scale).
+		// Center disk for uniform scale.
 		{
 			const bool h = isHover(GizmoHit::Kind::ScaleUniform, 3);
 			const glm::vec4 c = h ? HoverCol(kCenterCol) : kCenterCol;
-			m_Gizmo->AddWireCube(pivot, L * kCenterCubeSize, c, 2.0f);
+			m_Gizmo->AddDisk(pivot, L * 0.055f, camPos, c, 16);
 		}
 
 		// Rotation arc while dragging — visualizes the swept angle.
@@ -848,11 +863,12 @@ namespace Sandbox {
 		o.name  = AutoNameFor(StripFilename(sourceName));
 		o.splat = std::make_unique<GaussianSplatRenderer>(Application::Get().GetGfx());
 		o.splat->Upload(parsed);
-		// Drop the centroid at world origin so the FIRST object lands on the
-		// grid where the camera is looking. Multi-load: subsequent objects
-		// inherit the same offset, so the user sees them stacked at origin
-		// until they move them.
-		o.transform.position = -o.splat->Centroid();
+		// Center XZ on the centroid; lift Y so the bbox bottom sits on the grid.
+		const glm::vec3 c = o.splat->Centroid();
+		o.transform.position.x = -c.x;
+		o.transform.position.z = -c.z;
+		const auto& bb = o.splat->BoundingBox();
+		o.transform.position.y = bb.valid ? -bb.min.y : -c.y;
 		o.splat->SetModelMatrix(o.transform.Matrix());
 		o.visible = true;
 
@@ -934,6 +950,19 @@ namespace Sandbox {
 		if (!o) return;
 		o->visible = visible;
 		PostObjectsList();
+	}
+
+
+	void EditorScene::SetTransform(ObjectId id, const glm::vec3& pos,
+	                               const glm::vec3& eulerDeg, const glm::vec3& scale)
+	{
+		auto* o = FindObject(id);
+		if (!o) return;
+		o->transform.position = pos;
+		o->transform.rotation = glm::quat(glm::radians(eulerDeg));
+		o->transform.scale    = scale;
+		if (o->splat) o->splat->SetModelMatrix(o->transform.Matrix());
+		PostTransformUpdate(true);
 	}
 
 
@@ -1091,6 +1120,19 @@ EDITOR_EXPORT void editor_set_visibility(double id, int visible)
 	auto* s = ::Sandbox::EditorScene::Current();
 	if (!s) return;
 	s->SetVisibility(static_cast<::Sandbox::EditorScene::ObjectId>(id), visible != 0);
+}
+
+EDITOR_EXPORT void editor_set_transform(double id,
+                                        double px, double py, double pz,
+                                        double rx, double ry, double rz,
+                                        double sx, double sy, double sz)
+{
+	auto* s = ::Sandbox::EditorScene::Current();
+	if (!s) return;
+	s->SetTransform(static_cast<::Sandbox::EditorScene::ObjectId>(id),
+	                glm::vec3((float)px, (float)py, (float)pz),
+	                glm::vec3((float)rx, (float)ry, (float)rz),
+	                glm::vec3((float)sx, (float)sy, (float)sz));
 }
 
 EDITOR_EXPORT void editor_set_snap(int onOff)

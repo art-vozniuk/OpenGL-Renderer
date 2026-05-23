@@ -38,6 +38,15 @@ namespace Engine {
 			glm::vec4 color; // rgba
 		};
 
+		// World-space filled triangle. Layout matches `Tri` in gizmo_tri.wgsl.
+		struct TriEntry
+		{
+			glm::vec4 a;
+			glm::vec4 b;
+			glm::vec4 c;
+			glm::vec4 color;
+		};
+
 		explicit GizmoRenderer(WGPUContext& ctx);
 		~GizmoRenderer();
 
@@ -46,7 +55,7 @@ namespace Engine {
 
 		// Frame-level queue. The renderer copies these into a GPU storage
 		// buffer on EncodeRender, growing the buffer if needed.
-		void Clear() { m_Lines.clear(); }
+		void Clear() { m_Lines.clear(); m_Tris.clear(); }
 
 		void AddLine(const glm::vec3& a, const glm::vec3& b,
 		             const glm::vec4& color, float thicknessPx = 3.0f)
@@ -57,6 +66,37 @@ namespace Engine {
 			e.color = color;
 			m_Lines.push_back(e);
 		}
+
+		void AddTri(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c,
+		            const glm::vec4& color)
+		{
+			TriEntry e{};
+			e.a = glm::vec4(a, 0.0f);
+			e.b = glm::vec4(b, 0.0f);
+			e.c = glm::vec4(c, 0.0f);
+			e.color = color;
+			m_Tris.push_back(e);
+		}
+
+		// Camera-facing billboard arrowhead. Apex at `tip`; base perpendicular
+		// to `axisDir` at length-`headLen` back from the tip, width `headWidth`.
+		// `cameraPos` is used to orient the billboard's "sideways".
+		void AddArrowHead(const glm::vec3& tip, const glm::vec3& axisDir,
+		                  float headLen, float headWidth,
+		                  const glm::vec3& cameraPos, const glm::vec4& color);
+
+		// Filled hexagonal disk facing `cameraPos`, world-space radius `r`.
+		void AddDisk(const glm::vec3& center, float radius,
+		             const glm::vec3& cameraPos, const glm::vec4& color,
+		             int segments = 12);
+
+		// Partial ring — `startRad..endRad` around `center` in plane perp to
+		// `axis`. Use this for rotate handles drawn as quarter / half arcs
+		// instead of full rings.
+		void AddArc(const glm::vec3& center, const glm::vec3& axis, float radius,
+		            float startRad, float endRad,
+		            const glm::vec4& color, int segments = 32,
+		            float thicknessPx = 3.0f);
 
 		// High-level primitives. All build on AddLine().
 		// `arrow` draws an axis line `pivot → pivot + dir * length` with a
@@ -93,23 +133,34 @@ namespace Engine {
 		                  const glm::vec2& viewportSize);
 
 		size_t LineCount() const { return m_Lines.size(); }
+		size_t TriCount()  const { return m_Tris.size();  }
 
 	private:
-		void CreatePipeline();
+		void CreateLinePipeline();
+		void CreateTriPipeline();
 		void EnsureLineBufferCapacity(size_t lineCount);
+		void EnsureTriBufferCapacity(size_t triCount);
 		void DestroyGpuResources();
 
 		WGPUContext*           m_Ctx = nullptr;
-
 		WGPUBuffer             m_Uniform   = nullptr;
+
 		WGPUBuffer             m_LineBuf   = nullptr;
-		size_t                 m_LineCap   = 0;   // capacity in entries
-		WGPUBindGroupLayout    m_BGL       = nullptr;
-		WGPUBindGroup          m_BG        = nullptr;
-		WGPUPipelineLayout     m_PL        = nullptr;
-		WGPURenderPipeline     m_Pipe      = nullptr;
+		size_t                 m_LineCap   = 0;
+		WGPUBindGroupLayout    m_LineBGL   = nullptr;
+		WGPUBindGroup          m_LineBG    = nullptr;
+		WGPUPipelineLayout     m_LinePL    = nullptr;
+		WGPURenderPipeline     m_LinePipe  = nullptr;
+
+		WGPUBuffer             m_TriBuf    = nullptr;
+		size_t                 m_TriCap    = 0;
+		WGPUBindGroupLayout    m_TriBGL    = nullptr;
+		WGPUBindGroup          m_TriBG     = nullptr;
+		WGPUPipelineLayout     m_TriPL     = nullptr;
+		WGPURenderPipeline     m_TriPipe   = nullptr;
 
 		std::vector<LineEntry> m_Lines;
+		std::vector<TriEntry>  m_Tris;
 	};
 
 }

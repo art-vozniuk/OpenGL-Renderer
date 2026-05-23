@@ -60,6 +60,10 @@ namespace Sandbox {
 		void     FocusObject(ObjectId id);
 		void     RenameObject(ObjectId id, const std::string& name);
 		void     SetVisibility(ObjectId id, bool visible);
+		// Apply a whole-transform update from the React inspector. Rotation
+		// is euler degrees (XYZ order), matching what PostTransformUpdate emits.
+		void     SetTransform(ObjectId id, const glm::vec3& pos,
+		                      const glm::vec3& eulerDeg, const glm::vec3& scale);
 		void     SetSnap(bool snap);
 		void     ClearAll();
 
