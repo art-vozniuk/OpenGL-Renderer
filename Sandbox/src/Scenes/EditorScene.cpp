@@ -877,7 +877,8 @@ namespace Sandbox {
 			o.splat->EncodeSort(Renderer::Encoder(), view, proj);
 		}
 
-		// 2) Splat / grid / gizmo pass (no depth — existing pipelines).
+		// 2) Splat / grid pass (no depth — existing pipelines). Gizmo deferred
+		//    to a final overlay pass so it draws on top of meshes.
 		const WGPUPassTimestampWrites* renderTw =
 			perfSplat ? perfSplat->GetRenderPassTimestampWrites() : nullptr;
 		Renderer::OpenColorPass(0.12f, 0.13f, 0.16f, 1.0f, renderTw);
@@ -887,9 +888,6 @@ namespace Sandbox {
 			if (o.kind != Kind::Splat || !o.splat || !o.visible) continue;
 			o.splat->EncodeRender(Renderer::CurrentPass(), activeCam, viewport);
 		}
-
-		BuildSceneGizmos(viewport);
-		if (m_Gizmo) m_Gizmo->EncodeRender(Renderer::CurrentPass(), activeCam, viewport);
 
 		Renderer::ClosePass();
 		if (perfSplat) perfSplat->ResolveAndReadTimestamps(Renderer::Encoder());
@@ -945,6 +943,33 @@ namespace Sandbox {
 				}
 				wgpuRenderPassEncoderEnd(meshPass);
 				wgpuRenderPassEncoderRelease(meshPass);
+			}
+		}
+
+		// 4) Gizmo overlay — load color, no depth attachment. Renders on top of
+		//    meshes/splats so the transform widget is always visible/grabbable,
+		//    even when the pivot lands inside a mesh (Blender/Spline/Unity do
+		//    the same — pickability stays world-space; only rasterization is on top).
+		BuildSceneGizmos(viewport);
+		if (m_Gizmo) {
+			WGPUTextureView frameView = Renderer::FrameView();
+			if (frameView) {
+				WGPURenderPassColorAttachment gColor{};
+				gColor.view       = frameView;
+				gColor.loadOp     = WGPULoadOp_Load;
+				gColor.storeOp    = WGPUStoreOp_Store;
+				gColor.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+
+				WGPURenderPassDescriptor grp{};
+				grp.label                = SV("editor-gizmo-overlay");
+				grp.colorAttachmentCount = 1;
+				grp.colorAttachments     = &gColor;
+
+				WGPURenderPassEncoder gizmoPass = wgpuCommandEncoderBeginRenderPass(
+					Renderer::Encoder(), &grp);
+				m_Gizmo->EncodeRender(gizmoPass, activeCam, viewport);
+				wgpuRenderPassEncoderEnd(gizmoPass);
+				wgpuRenderPassEncoderRelease(gizmoPass);
 			}
 		}
 
