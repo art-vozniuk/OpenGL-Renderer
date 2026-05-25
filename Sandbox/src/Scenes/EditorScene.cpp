@@ -46,9 +46,11 @@ namespace Sandbox {
 		constexpr float kSnapRotateRad = glm::radians(15.0f);
 		constexpr float kSnapScale     = 0.10f;
 
-		constexpr float kShaftFrac = 0.70f;
-		constexpr float kRingFrac  = 0.85f;
-		constexpr float kCubeFrac  = 1.00f;
+		// Spline-style compact widget: arrow tip == scale sphere, rotate arcs
+		// span between adjacent arm tips. All three handles share one arm length.
+		constexpr float kArmFrac      = 0.85f;
+		constexpr float kArrowHeadFrac = 0.22f;
+		constexpr float kScaleSphereR  = 0.07f;
 
 		// Light gizmo dimensions in world units.
 		constexpr float kLightSphereR = 0.18f;
@@ -467,27 +469,25 @@ namespace Sandbox {
 		};
 
 		for (int a = 0; a < 3; ++a) {
-			const glm::vec3 tip = pivot + AxisDir(a) * L * kShaftFrac;
+			const glm::vec3 tip = pivot + AxisDir(a) * L * kArmFrac;
 			glm::vec2 tipPx;
 			if (!ProjectToScreen(tip, cam, viewport, tipPx)) continue;
 			const float d = DistPointSegment(cursor, pivotPx, tipPx);
 			consider(GizmoHit::Kind::TranslateAxis, a, d, kAxisHitThreshPx);
 		}
 
-		constexpr int kRingSamples = 48;
+		// Rotate arc spans between adjacent arm tips (90 deg quarter-circle).
+		constexpr int kArcSamples = 24;
 		for (int a = 0; a < 3; ++a) {
-			const glm::vec3 axis = AxisDir(a);
-			const glm::vec3 u =
-				(std::abs(axis.x) < 0.5f) ? glm::normalize(glm::cross(axis, glm::vec3(1, 0, 0)))
-				                          : glm::normalize(glm::cross(axis, glm::vec3(0, 1, 0)));
-			const glm::vec3 v = glm::normalize(glm::cross(axis, u));
+			const glm::vec3 uA = AxisDir((a + 1) % 3);
+			const glm::vec3 vA = AxisDir((a + 2) % 3);
 			glm::vec2 prev{};
 			bool havePrev = false;
-			for (int i = 0; i <= kRingSamples; ++i) {
-				const float t = float(i) / float(kRingSamples);
-				const float ang = t * glm::two_pi<float>();
+			for (int i = 0; i <= kArcSamples; ++i) {
+				const float t = float(i) / float(kArcSamples);
+				const float ang = t * glm::half_pi<float>();
 				const glm::vec3 wp = pivot
-					+ (std::cos(ang) * u + std::sin(ang) * v) * (L * kRingFrac);
+					+ (std::cos(ang) * uA + std::sin(ang) * vA) * (L * kArmFrac);
 				glm::vec2 px;
 				if (!ProjectToScreen(wp, cam, viewport, px)) {
 					havePrev = false;
@@ -503,7 +503,7 @@ namespace Sandbox {
 		}
 
 		for (int a = 0; a < 3; ++a) {
-			const glm::vec3 c = pivot + AxisDir(a) * L * kCubeFrac;
+			const glm::vec3 c = pivot + AxisDir(a) * L * kArmFrac;
 			glm::vec2 px;
 			if (!ProjectToScreen(c, cam, viewport, px)) continue;
 			consider(GizmoHit::Kind::ScaleAxis, a, glm::length(cursor - px), kPointHitThreshPx);
@@ -544,10 +544,8 @@ namespace Sandbox {
 			const glm::vec3 axis = AxisDir(hit.axis);
 			glm::vec3 hp; float dt;
 			if (RayPlane(ro, rd, pivot, axis, hp, dt)) {
-				const glm::vec3 u = (std::abs(axis.x) < 0.5f)
-					? glm::normalize(glm::cross(axis, glm::vec3(1, 0, 0)))
-					: glm::normalize(glm::cross(axis, glm::vec3(0, 1, 0)));
-				const glm::vec3 v = glm::normalize(glm::cross(axis, u));
+				const glm::vec3 u = AxisDir((hit.axis + 1) % 3);
+				const glm::vec3 v = AxisDir((hit.axis + 2) % 3);
 				const glm::vec3 r = hp - pivot;
 				m_Drag.startAngleRad = std::atan2(glm::dot(r, v), glm::dot(r, u));
 				m_Drag.currentAngleRad = m_Drag.startAngleRad;
@@ -587,10 +585,8 @@ namespace Sandbox {
 			const glm::vec3 axis = AxisDir(m_Drag.axis);
 			glm::vec3 hp; float dt;
 			if (!RayPlane(ro, rd, pivot0, axis, hp, dt)) return;
-			const glm::vec3 u = (std::abs(axis.x) < 0.5f)
-				? glm::normalize(glm::cross(axis, glm::vec3(1, 0, 0)))
-				: glm::normalize(glm::cross(axis, glm::vec3(0, 1, 0)));
-			const glm::vec3 v = glm::normalize(glm::cross(axis, u));
+			const glm::vec3 u = AxisDir((m_Drag.axis + 1) % 3);
+			const glm::vec3 v = AxisDir((m_Drag.axis + 2) % 3);
 			const glm::vec3 r = hp - pivot0;
 			const float ang = std::atan2(glm::dot(r, v), glm::dot(r, u));
 			float delta = ang - m_Drag.startAngleRad;
@@ -730,36 +726,46 @@ namespace Sandbox {
 			return m_Hover.kind == k && m_Hover.axis == a;
 		};
 
+		// Spline-style compact widget: three arms, each ending in a sphere at
+		// the arrow tip; rotate arcs span between adjacent arm tips.
+		const float arm     = L * kArmFrac;
+		const float headLen = arm * kArrowHeadFrac;
+		const float headW   = headLen * 0.55f;
+
 		for (int a = 0; a < 3; ++a) {
 			const glm::vec4 baseCol = kAxisCol[a];
 			const glm::vec3 axisDir = AxisDir(a);
+			const glm::vec3 tip     = pivot + axisDir * arm;
+			const glm::vec3 shaftEnd = pivot + axisDir * (arm - headLen * 0.6f);
 
 			{
 				const bool h = isHover(GizmoHit::Kind::TranslateAxis, a);
 				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
-				const glm::vec3 tip = pivot + axisDir * L * kShaftFrac;
-				m_Gizmo->AddLine(pivot, tip, c, 5.5f);
-				m_Gizmo->AddArrowHead(tip, axisDir, L * 0.24f, L * 0.14f, camPos, c);
-			}
-			{
-				const bool h = isHover(GizmoHit::Kind::RotateRing, a);
-				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
-				const glm::vec3 u = (std::abs(axisDir.x) < 0.5f)
-					? glm::normalize(glm::cross(axisDir, glm::vec3(1,0,0)))
-					: glm::normalize(glm::cross(axisDir, glm::vec3(0,1,0)));
-				const glm::vec3 v = glm::normalize(glm::cross(axisDir, u));
-				const glm::vec3 toCam = glm::normalize(camPos - pivot);
-				const float centerAng = std::atan2(glm::dot(toCam, v), glm::dot(toCam, u));
-				const float halfSpan  = glm::radians(80.0f);
-				m_Gizmo->AddArc(pivot, axisDir, L * kRingFrac,
-				                centerAng - halfSpan, centerAng + halfSpan,
-				                c, 32, 4.5f);
+				m_Gizmo->AddLine(pivot, shaftEnd, c, 5.5f);
+				m_Gizmo->AddArrowHead(tip, axisDir, headLen, headW, camPos, c);
 			}
 			{
 				const bool h = isHover(GizmoHit::Kind::ScaleAxis, a);
 				const glm::vec4 c = h ? HoverCol(baseCol) : baseCol;
-				const glm::vec3 ballCenter = pivot + axisDir * L * kCubeFrac;
-				m_Gizmo->AddDisk(ballCenter, L * 0.07f, camPos, c, 16);
+				m_Gizmo->AddDisk(tip, L * kScaleSphereR, camPos, c, 16);
+			}
+		}
+
+		// Rotate arcs: 90 deg quarter-circle from arm-tip(a+1) to arm-tip(a+2),
+		// in the plane perpendicular to axis a.
+		for (int a = 0; a < 3; ++a) {
+			const bool h = isHover(GizmoHit::Kind::RotateRing, a);
+			const glm::vec4 c = h ? HoverCol(kAxisCol[a]) : kAxisCol[a];
+			const glm::vec3 uA = AxisDir((a + 1) % 3);
+			const glm::vec3 vA = AxisDir((a + 2) % 3);
+			constexpr int kArcSeg = 16;
+			glm::vec3 prev = pivot + uA * arm;
+			for (int i = 1; i <= kArcSeg; ++i) {
+				const float t = float(i) / float(kArcSeg);
+				const float ang = t * glm::half_pi<float>();
+				const glm::vec3 cur = pivot + (std::cos(ang) * uA + std::sin(ang) * vA) * arm;
+				m_Gizmo->AddLine(prev, cur, c, 4.5f);
+				prev = cur;
 			}
 		}
 
@@ -771,22 +777,19 @@ namespace Sandbox {
 
 		if (m_Drag.active && m_Drag.kind == GizmoHit::Kind::RotateRing) {
 			const int a = m_Drag.axis;
-			const glm::vec3 axis = AxisDir(a);
-			const glm::vec3 u =
-				(std::abs(axis.x) < 0.5f) ? glm::normalize(glm::cross(axis, glm::vec3(1, 0, 0)))
-				                          : glm::normalize(glm::cross(axis, glm::vec3(0, 1, 0)));
-			const glm::vec3 v = glm::normalize(glm::cross(axis, u));
+			const glm::vec3 u = AxisDir((a + 1) % 3);
+			const glm::vec3 v = AxisDir((a + 2) % 3);
 
 			float a0 = m_Drag.startAngleRad;
 			float a1 = m_Drag.currentAngleRad;
 			float span = a1 - a0;
 			int N = std::max(2, (int)std::ceil(std::abs(span) * 32.0f / glm::pi<float>()));
 			const glm::vec4 fillCol = glm::vec4(kAxisCol[a].r, kAxisCol[a].g, kAxisCol[a].b, 0.5f);
-			glm::vec3 prev = pivot + (std::cos(a0) * u + std::sin(a0) * v) * (L * kRingFrac);
+			glm::vec3 prev = pivot + (std::cos(a0) * u + std::sin(a0) * v) * arm;
 			for (int i = 1; i <= N; ++i) {
 				const float t = float(i) / float(N);
 				const float ang = a0 + span * t;
-				const glm::vec3 cur = pivot + (std::cos(ang) * u + std::sin(ang) * v) * (L * kRingFrac);
+				const glm::vec3 cur = pivot + (std::cos(ang) * u + std::sin(ang) * v) * arm;
 				m_Gizmo->AddLine(pivot, cur, fillCol, 1.5f);
 				m_Gizmo->AddLine(prev, cur, glm::vec4(fillCol.r, fillCol.g, fillCol.b, 0.95f), 3.0f);
 				prev = cur;
